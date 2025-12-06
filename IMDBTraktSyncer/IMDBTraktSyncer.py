@@ -19,6 +19,12 @@ from IMDBTraktSyncer import arguments
 class PageLoadException(Exception):
     pass
 
+# Performance optimization constants
+TRAKT_BATCH_SIZE = 50  # Number of items to batch together for Trakt API requests (Trakt allows up to 50 items per request)
+TRAKT_BATCH_DELAY = 0.1  # Small delay between batch requests (100ms) to avoid rate limiting
+IMDB_OPERATION_DELAY = 0.3  # Small delay between IMDB operations (300ms) to avoid being flagged as bot
+IMDB_BATCH_DELAY = 1.0  # Slightly longer delay every 10 IMDB operations (1 second)
+
 def main():
     parser = argparse.ArgumentParser(description="IMDBTraktSyncer CLI")
     parser.add_argument("--clear-user-data", action="store_true", help="Clears user entered credentials.")
@@ -606,70 +612,132 @@ def main():
                         
             # If sync_watchlist_value is true
             if sync_watchlist_value:
-                # Set Trakt Watchlist Items
+                # Set Trakt Watchlist Items (with batching for faster processing)
                 if trakt_watchlist_to_set:
                     print('Setting Trakt Watchlist Items')
 
                     # Count the total number of items
                     num_items = len(trakt_watchlist_to_set)
-                    item_count = 0
-
+                    
+                    # Process items in batches
+                    url = f"https://api.trakt.tv/sync/watchlist"
+                    
+                    # Group items by type for better batching
+                    batch = {
+                        "movies": [],
+                        "shows": [],
+                        "episodes": []
+                    }
+                    
+                    items_in_batch = []
+                    batch_count = 0
+                    processed_count = 0
+                    
                     for item in trakt_watchlist_to_set:
-                        item_count += 1
-                        
                         imdb_id = item['IMDB_ID']
                         media_type = item['Type']  # 'movie', 'show', or 'episode'
-
-                        url = f"https://api.trakt.tv/sync/watchlist"
-
-                        data = {
-                            "movies": [],
-                            "shows": [],
-                            "episodes": []
+                        
+                        # Prepare item data
+                        item_data = {
+                            "ids": {
+                                "imdb": imdb_id
+                            }
                         }
-
+                        
                         if media_type == 'movie':
-                            data['movies'].append({
-                                "ids": {
-                                    "imdb": imdb_id
-                                }
-                            })
+                            batch['movies'].append(item_data)
                         elif media_type == 'show':
-                            data['shows'].append({
-                                "ids": {
-                                    "imdb": imdb_id
-                                }
-                            })
+                            batch['shows'].append(item_data)
                         elif media_type == 'episode':
-                            data['episodes'].append({
-                                "ids": {
-                                    "imdb": imdb_id
-                                }
-                            })
+                            batch['episodes'].append(item_data)
                         else:
-                            data = None
-
-                        if data:
-                            response = EH.make_trakt_request(url, payload=data)
-                            
-                            season_number = item.get('SeasonNumber')
-                            episode_number = item.get('EpisodeNumber')
-                            if season_number and episode_number:
-                                season_number = str(season_number).zfill(2)
-                                episode_number = str(episode_number).zfill(2)
-                                episode_title = f'[S{season_number}E{episode_number}] '
-                            else:
-                                episode_title = ''
+                            continue
+                        
+                        items_in_batch.append(item)
+                        
+                        # Send batch when it reaches the batch size
+                        if len(batch['movies']) + len(batch['shows']) + len(batch['episodes']) >= TRAKT_BATCH_SIZE:
+                            batch_count += 1
+                            response = EH.make_trakt_request(url, payload=batch)
                             
                             if response and response.status_code in [200, 201, 204]:
-                                print(f" - Added {item['Type']} ({item_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}) to Trakt Watchlist ({item['IMDB_ID']})")
-                                
+                                # Print all items in batch
+                                for item in items_in_batch:
+                                    processed_count += 1
+                                    season_number = item.get('SeasonNumber')
+                                    episode_number = item.get('EpisodeNumber')
+                                    if season_number and episode_number:
+                                        season_number = str(season_number).zfill(2)
+                                        episode_number = str(episode_number).zfill(2)
+                                        episode_title = f'[S{season_number}E{episode_number}] '
+                                    else:
+                                        episode_title = ''
+                                    print(f" - Added {item['Type']} ({processed_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}) to Trakt Watchlist ({item['IMDB_ID']})")
                             else:
-                                error_message = f"Failed to add {item['Type']} ({item_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}) to Trakt Watchlist ({item['IMDB_ID']})"
+                                # Print errors for failed items
+                                for item in items_in_batch:
+                                    processed_count += 1
+                                    season_number = item.get('SeasonNumber')
+                                    episode_number = item.get('EpisodeNumber')
+                                    if season_number and episode_number:
+                                        season_number = str(season_number).zfill(2)
+                                        episode_number = str(episode_number).zfill(2)
+                                        episode_title = f'[S{season_number}E{episode_number}] '
+                                    else:
+                                        episode_title = ''
+                                    error_message = f"Failed to add {item['Type']} ({processed_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}) to Trakt Watchlist ({item['IMDB_ID']})"
+                                    print(f"   - {error_message}")
+                                    EL.logger.error(error_message)
+                            
+                            # Reset batch
+                            batch = {
+                                "movies": [],
+                                "shows": [],
+                                "episodes": []
+                            }
+                            items_in_batch = []
+                            
+                            # Small delay between batches to avoid rate limiting
+                            if batch_count % 10 == 0:  # Every 10 batches (500 items)
+                                time.sleep(TRAKT_BATCH_DELAY * 2)
+                            else:
+                                time.sleep(TRAKT_BATCH_DELAY)
+                    
+                    # Send remaining items in final batch
+                    if len(batch['movies']) + len(batch['shows']) + len(batch['episodes']) > 0:
+                        batch_count += 1
+                        response = EH.make_trakt_request(url, payload=batch)
+                        
+                        if response and response.status_code in [200, 201, 204]:
+                            # Print all items in final batch
+                            for item in items_in_batch:
+                                processed_count += 1
+                                season_number = item.get('SeasonNumber')
+                                episode_number = item.get('EpisodeNumber')
+                                if season_number and episode_number:
+                                    season_number = str(season_number).zfill(2)
+                                    episode_number = str(episode_number).zfill(2)
+                                    episode_title = f'[S{season_number}E{episode_number}] '
+                                else:
+                                    episode_title = ''
+                                print(f" - Added {item['Type']} ({processed_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}) to Trakt Watchlist ({item['IMDB_ID']})")
+                        else:
+                            # Print errors for failed items
+                            for item in items_in_batch:
+                                processed_count += 1
+                                season_number = item.get('SeasonNumber')
+                                episode_number = item.get('EpisodeNumber')
+                                if season_number and episode_number:
+                                    season_number = str(season_number).zfill(2)
+                                    episode_number = str(episode_number).zfill(2)
+                                    episode_title = f'[S{season_number}E{episode_number}] '
+                                else:
+                                    episode_title = ''
+                                error_message = f"Failed to add {item['Type']} ({processed_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}) to Trakt Watchlist ({item['IMDB_ID']})"
                                 print(f"   - {error_message}")
                                 EL.logger.error(error_message)
 
-                    print('Setting Trakt Watchlist Items Complete')
+                    print(f'Setting Trakt Watchlist Items Complete (Processed {processed_count} items in {batch_count} batch(es))')
                 else:
                     print('No Trakt Watchlist Items To Set')
 
@@ -719,15 +787,21 @@ def main():
                                 if 'ipc-icon--done' not in watchlist_button.get_attribute('innerHTML'):
                                     retry_count = 0
                                     while retry_count < 2:
-                                        driver.execute_script("arguments[0].click();", watchlist_button)
-                                        try:
-                                            WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.CSS_SELECTOR, 'button[data-testid="tm-box-wl-button"] .ipc-icon--done')))
-                                            
-                                            print(f" - Added {item['Type']} ({item_count} of {num_items}): {episode_title}{item['Title']}{year_str} to IMDB Watchlist ({item['IMDB_ID']})")
-                                            
-                                            break  # Break the loop if successful
-                                        except TimeoutException:
-                                            retry_count += 1
+                                    driver.execute_script("arguments[0].click();", watchlist_button)
+                                    try:
+                                        WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.CSS_SELECTOR, 'button[data-testid="tm-box-wl-button"] .ipc-icon--done')))
+                                        
+                                        print(f" - Added {item['Type']} ({item_count} of {num_items}): {episode_title}{item['Title']}{year_str} to IMDB Watchlist ({item['IMDB_ID']})")
+                                        
+                                        # Small delay between operations to avoid being flagged
+                                        if item_count % 10 == 0:  # Every 10 items, slightly longer delay
+                                            time.sleep(IMDB_BATCH_DELAY)
+                                        else:
+                                            time.sleep(IMDB_OPERATION_DELAY)
+                                        
+                                        break  # Break the loop if successful
+                                    except TimeoutException:
+                                        retry_count += 1
 
                                     if retry_count == 2:
                                         error_message = f"Failed to add item ({item_count} of {num_items}): {episode_title}{item['Title']}{year_str} to IMDB Watchlist ({item['IMDB_ID']})"
@@ -763,7 +837,7 @@ def main():
             # If sync_ratings_value is true
             if sync_ratings_value:
                 
-                #Set Trakt Ratings
+                #Set Trakt Ratings (with batching for faster processing)
                 if trakt_ratings_to_set:
                     print('Setting Trakt Ratings')
 
@@ -772,65 +846,121 @@ def main():
                     
                     # Count the total number of items
                     num_items = len(trakt_ratings_to_set)
-                    item_count = 0
-                            
+                    
+                    # Process items in batches
+                    batch = {
+                        "movies": [],
+                        "shows": [],
+                        "episodes": []
+                    }
+                    
+                    items_in_batch = []
+                    batch_count = 0
+                    processed_count = 0
+                    
                     # Loop through your data table and rate each item on Trakt
                     for item in trakt_ratings_to_set:
-                        item_count += 1
-                        if item["Type"] == "show":
-                            # This is a TV show
-                            data = {
-                                "shows": [{
-                                    "ids": {
-                                        "imdb": item["IMDB_ID"]
-                                    },
-                                    "rating": item["Rating"]
-                                }]
-                            }
-                        elif item["Type"] == "movie":
-                            # This is a movie
-                            data = {
-                                "movies": [{
-                                    "ids": {
-                                        "imdb": item["IMDB_ID"]
-                                    },
-                                    "rating": item["Rating"]
-                                }]
-                            }
-                        elif item["Type"] == "episode":
-                            # This is an episode
-                            data = {
-                                "episodes": [{
-                                    "ids": {
-                                        "imdb": item["IMDB_ID"]
-                                    },
-                                    "rating": item["Rating"]
-                                }]
-                            }
-                        else:
-                            data = None
+                        item_data = {
+                            "ids": {
+                                "imdb": item["IMDB_ID"]
+                            },
+                            "rating": item["Rating"]
+                        }
                         
-                        if data:
-                            # Make the API call to rate the item
-                            response = EH.make_trakt_request(rate_url, payload=data)
-                            
-                            season_number = item.get('SeasonNumber')
-                            episode_number = item.get('EpisodeNumber')
-                            if season_number and episode_number:
-                                season_number = str(season_number).zfill(2)
-                                episode_number = str(episode_number).zfill(2)
-                                episode_title = f'[S{season_number}E{episode_number}] '
-                            else:
-                                episode_title = ''
+                        if item["Type"] == "show":
+                            batch['shows'].append(item_data)
+                        elif item["Type"] == "movie":
+                            batch['movies'].append(item_data)
+                        elif item["Type"] == "episode":
+                            batch['episodes'].append(item_data)
+                        else:
+                            continue
+                        
+                        items_in_batch.append(item)
+                        
+                        # Send batch when it reaches the batch size
+                        if len(batch['movies']) + len(batch['shows']) + len(batch['episodes']) >= TRAKT_BATCH_SIZE:
+                            batch_count += 1
+                            response = EH.make_trakt_request(rate_url, payload=batch)
                             
                             if response and response.status_code in [200, 201, 204]:
-                                print(f" - Rated {item['Type']} ({item_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}): {item['Rating']}/10 on Trakt ({item['IMDB_ID']})")
+                                # Print all items in batch
+                                for item in items_in_batch:
+                                    processed_count += 1
+                                    season_number = item.get('SeasonNumber')
+                                    episode_number = item.get('EpisodeNumber')
+                                    if season_number and episode_number:
+                                        season_number = str(season_number).zfill(2)
+                                        episode_number = str(episode_number).zfill(2)
+                                        episode_title = f'[S{season_number}E{episode_number}] '
+                                    else:
+                                        episode_title = ''
+                                    print(f" - Rated {item['Type']} ({processed_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}): {item['Rating']}/10 on Trakt ({item['IMDB_ID']})")
                             else:
-                                error_message = f"Failed rating {item['Type']} ({item_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}): {item['Rating']}/10 on Trakt ({item['IMDB_ID']})"
+                                # Print errors for failed items
+                                for item in items_in_batch:
+                                    processed_count += 1
+                                    season_number = item.get('SeasonNumber')
+                                    episode_number = item.get('EpisodeNumber')
+                                    if season_number and episode_number:
+                                        season_number = str(season_number).zfill(2)
+                                        episode_number = str(episode_number).zfill(2)
+                                        episode_title = f'[S{season_number}E{episode_number}] '
+                                    else:
+                                        episode_title = ''
+                                    error_message = f"Failed rating {item['Type']} ({processed_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}): {item['Rating']}/10 on Trakt ({item['IMDB_ID']})"
+                                    print(f"   - {error_message}")
+                                    EL.logger.error(error_message)
+                            
+                            # Reset batch
+                            batch = {
+                                "movies": [],
+                                "shows": [],
+                                "episodes": []
+                            }
+                            items_in_batch = []
+                            
+                            # Small delay between batches to avoid rate limiting
+                            if batch_count % 10 == 0:  # Every 10 batches (500 items)
+                                time.sleep(TRAKT_BATCH_DELAY * 2)
+                            else:
+                                time.sleep(TRAKT_BATCH_DELAY)
+                    
+                    # Send remaining items in final batch
+                    if len(batch['movies']) + len(batch['shows']) + len(batch['episodes']) > 0:
+                        batch_count += 1
+                        response = EH.make_trakt_request(rate_url, payload=batch)
+                        
+                        if response and response.status_code in [200, 201, 204]:
+                            # Print all items in final batch
+                            for item in items_in_batch:
+                                processed_count += 1
+                                season_number = item.get('SeasonNumber')
+                                episode_number = item.get('EpisodeNumber')
+                                if season_number and episode_number:
+                                    season_number = str(season_number).zfill(2)
+                                    episode_number = str(episode_number).zfill(2)
+                                    episode_title = f'[S{season_number}E{episode_number}] '
+                                else:
+                                    episode_title = ''
+                                print(f" - Rated {item['Type']} ({processed_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}): {item['Rating']}/10 on Trakt ({item['IMDB_ID']})")
+                        else:
+                            # Print errors for failed items
+                            for item in items_in_batch:
+                                processed_count += 1
+                                season_number = item.get('SeasonNumber')
+                                episode_number = item.get('EpisodeNumber')
+                                if season_number and episode_number:
+                                    season_number = str(season_number).zfill(2)
+                                    episode_number = str(episode_number).zfill(2)
+                                    episode_title = f'[S{season_number}E{episode_number}] '
+                                else:
+                                    episode_title = ''
+                                error_message = f"Failed rating {item['Type']} ({processed_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}): {item['Rating']}/10 on Trakt ({item['IMDB_ID']})"
                                 print(f"   - {error_message}")
                                 EL.logger.error(error_message)
 
-                    print('Setting Trakt Ratings Complete')
+                    print(f'Setting Trakt Ratings Complete (Processed {processed_count} items in {batch_count} batch(es))')
                 else:
                     print('No Trakt Ratings To Set')
 
@@ -892,7 +1022,11 @@ def main():
                                     driver.execute_script("arguments[0].click();", rating_option_element)
                                     submit_element = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'button.ipc-rating-prompt__rate-button')))
                                     driver.execute_script("arguments[0].click();", submit_element)
-                                    time.sleep(1)
+                                    # Small delay after rating submission
+                                    if i % 10 == 0:  # Every 10 items, slightly longer delay
+                                        time.sleep(IMDB_BATCH_DELAY)
+                                    else:
+                                        time.sleep(IMDB_OPERATION_DELAY)
                                     
                                     print(f' - Rated {item["Type"]}: ({i} of {len(imdb_ratings_to_set)}) {episode_title}{item["Title"]}{year_str}: {item["Rating"]}/10 on IMDB ({item["IMDB_ID"]})')
                                     
@@ -915,7 +1049,11 @@ def main():
                                 rating_option_element = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, f'.ipl-rating-selector__star-link[data-value="{item["Rating"]}"]')))
                                 driver.execute_script("arguments[0].click();", rating_option_element)
                                 
-                                time.sleep(1)
+                                # Small delay after rating submission
+                                if i % 10 == 0:  # Every 10 items, slightly longer delay
+                                    time.sleep(IMDB_BATCH_DELAY)
+                                else:
+                                    time.sleep(IMDB_OPERATION_DELAY)
                                 
                         except (NoSuchElementException, TimeoutException, PageLoadException):
                             error_message = f'Failed to rate {item["Type"]}: ({i} of {len(imdb_ratings_to_set)}) {episode_title}{item["Title"]}{year_str}: {item["Rating"]}/10 on IMDB ({item["IMDB_ID"]})'
@@ -1027,8 +1165,8 @@ def main():
                                         # Page failed to load, raise an exception
                                         raise PageLoadException(f"Failed to load page. Status code: {status_code}. URL: {url}")
                                     
-                                    # wait for input dom elements to fully load
-                                    time.sleep(3)
+                                    # wait for input dom elements to fully load (reduced delay)
+                                    time.sleep(1)
                                     
                                     review_title_input = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#text-input__0")))
                                     review_input = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#textarea__0")))
@@ -1062,7 +1200,11 @@ def main():
 
                                     driver.execute_script("arguments[0].click();", submit_button)
                                     
-                                    time.sleep(3) # wait for rating to submit
+                                    # Wait for review to submit, with optimized delays
+                                    if item_count % 10 == 0:  # Every 10 reviews, slightly longer delay
+                                        time.sleep(IMDB_BATCH_DELAY * 2)
+                                    else:
+                                        time.sleep(IMDB_BATCH_DELAY)
                                     
                                     print(f" - Submitted review ({item_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}) on IMDB ({item['IMDB_ID']})")
                                     
@@ -1083,7 +1225,7 @@ def main():
             # If remove_watched_from_watchlists_value is true
             if remove_watched_from_watchlists_value or remove_watchlist_items_older_than_x_days_value:
                 
-                # Remove Watched Items Trakt Watchlist
+                # Remove Watched Items Trakt Watchlist (with batching for faster processing)
                 if trakt_watchlist_items_to_remove:
                     print('Removing Watched Items From Trakt Watchlist')
 
@@ -1092,63 +1234,120 @@ def main():
 
                     # Count the total number of items
                     num_items = len(trakt_watchlist_items_to_remove)
-                    item_count = 0
+                    
+                    # Process items in batches
+                    batch = {
+                        "movies": [],
+                        "shows": [],
+                        "episodes": []
+                    }
+                    
+                    items_in_batch = []
+                    batch_count = 0
+                    processed_count = 0
 
                     # Loop through the items to remove from the watchlist
                     for item in trakt_watchlist_items_to_remove:
-                        item_count += 1
+                        item_data = {
+                            "ids": {
+                                "imdb": item["IMDB_ID"]
+                            }
+                        }
+                        
                         if item["Type"] == "show":
-                            # This is a TV show
-                            data = {
-                                "shows": [{
-                                    "ids": {
-                                        "imdb": item["IMDB_ID"]
-                                    }
-                                }]
-                            }
+                            batch['shows'].append(item_data)
                         elif item["Type"] == "movie":
-                            # This is a movie
-                            data = {
-                                "movies": [{
-                                    "ids": {
-                                        "imdb": item["IMDB_ID"]
-                                    }
-                                }]
-                            }
+                            batch['movies'].append(item_data)
                         elif item["Type"] == "episode":
-                            
-                            # This is an episode
-                            data = {
-                                "episodes": [{
-                                    "ids": {
-                                        "imdb": item["IMDB_ID"]
-                                    }
-                                }]
-                            }
+                            batch['episodes'].append(item_data)
                         else:
-                            data = None
-
-                        if data:
-                            # Make the API call to remove the item from the watchlist
-                            response = EH.make_trakt_request(remove_url, payload=data)
-
-                            season_number = item.get('SeasonNumber')
-                            episode_number = item.get('EpisodeNumber')
-                            if season_number and episode_number:
-                                season_number = str(season_number).zfill(2)
-                                episode_number = str(episode_number).zfill(2)
-                                episode_title = f'[S{season_number}E{episode_number}] '
-                            else:
-                                episode_title = ''
-                                                        
+                            continue
+                        
+                        items_in_batch.append(item)
+                        
+                        # Send batch when it reaches the batch size
+                        if len(batch['movies']) + len(batch['shows']) + len(batch['episodes']) >= TRAKT_BATCH_SIZE:
+                            batch_count += 1
+                            response = EH.make_trakt_request(remove_url, payload=batch)
+                            
                             if response and response.status_code in [200, 201, 204]:
-                                print(f" - Removed {item['Type']} ({item_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}) from Trakt Watchlist ({item['IMDB_ID']})")
+                                # Print all items in batch
+                                for item in items_in_batch:
+                                    processed_count += 1
+                                    season_number = item.get('SeasonNumber')
+                                    episode_number = item.get('EpisodeNumber')
+                                    if season_number and episode_number:
+                                        season_number = str(season_number).zfill(2)
+                                        episode_number = str(episode_number).zfill(2)
+                                        episode_title = f'[S{season_number}E{episode_number}] '
+                                    else:
+                                        episode_title = ''
+                                    print(f" - Removed {item['Type']} ({processed_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}) from Trakt Watchlist ({item['IMDB_ID']})")
                             else:
-                                error_message = f"Failed removing {item['Type']} ({item_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}) from Trakt Watchlist ({item['IMDB_ID']})"
+                                # Print errors for failed items
+                                for item in items_in_batch:
+                                    processed_count += 1
+                                    season_number = item.get('SeasonNumber')
+                                    episode_number = item.get('EpisodeNumber')
+                                    if season_number and episode_number:
+                                        season_number = str(season_number).zfill(2)
+                                        episode_number = str(episode_number).zfill(2)
+                                        episode_title = f'[S{season_number}E{episode_number}] '
+                                    else:
+                                        episode_title = ''
+                                    error_message = f"Failed removing {item['Type']} ({processed_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}) from Trakt Watchlist ({item['IMDB_ID']})"
+                                    print(f"   - {error_message}")
+                                    EL.logger.error(error_message)
+                            
+                            # Reset batch
+                            batch = {
+                                "movies": [],
+                                "shows": [],
+                                "episodes": []
+                            }
+                            items_in_batch = []
+                            
+                            # Small delay between batches to avoid rate limiting
+                            if batch_count % 10 == 0:  # Every 10 batches (500 items)
+                                time.sleep(TRAKT_BATCH_DELAY * 2)
+                            else:
+                                time.sleep(TRAKT_BATCH_DELAY)
+                    
+                    # Send remaining items in final batch
+                    if len(batch['movies']) + len(batch['shows']) + len(batch['episodes']) > 0:
+                        batch_count += 1
+                        response = EH.make_trakt_request(remove_url, payload=batch)
+                        
+                        if response and response.status_code in [200, 201, 204]:
+                            # Print all items in final batch
+                            for item in items_in_batch:
+                                processed_count += 1
+                                season_number = item.get('SeasonNumber')
+                                episode_number = item.get('EpisodeNumber')
+                                if season_number and episode_number:
+                                    season_number = str(season_number).zfill(2)
+                                    episode_number = str(episode_number).zfill(2)
+                                    episode_title = f'[S{season_number}E{episode_number}] '
+                                else:
+                                    episode_title = ''
+                                print(f" - Removed {item['Type']} ({processed_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}) from Trakt Watchlist ({item['IMDB_ID']})")
+                        else:
+                            # Print errors for failed items
+                            for item in items_in_batch:
+                                processed_count += 1
+                                season_number = item.get('SeasonNumber')
+                                episode_number = item.get('EpisodeNumber')
+                                if season_number and episode_number:
+                                    season_number = str(season_number).zfill(2)
+                                    episode_number = str(episode_number).zfill(2)
+                                    episode_title = f'[S{season_number}E{episode_number}] '
+                                else:
+                                    episode_title = ''
+                                error_message = f"Failed removing {item['Type']} ({processed_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}) from Trakt Watchlist ({item['IMDB_ID']})"
                                 print(f"   - {error_message}")
                                 EL.logger.error(error_message)
 
-                    print('Removing Watched Items From Trakt Watchlist Complete')
+                    print(f'Removing Watched Items From Trakt Watchlist Complete (Processed {processed_count} items in {batch_count} batch(es))')
                 else:
                     print('No Trakt Watchlist Items To Remove')
 
@@ -1246,7 +1445,7 @@ def main():
             # If sync_watch_history_value is true
             if sync_watch_history_value or mark_rated_as_watched_value:
             
-                # Set Trakt Watch History
+                # Set Trakt Watch History (with batching for faster processing)
                 if trakt_watch_history_to_set:
                     print('Setting Trakt Watch History')
 
@@ -1255,76 +1454,118 @@ def main():
                     
                     # Count the total number of items
                     num_items = len(trakt_watch_history_to_set)
-                    item_count = 0
+                    
+                    # Process items in batches
+                    batch = {
+                        "movies": [],
+                        "episodes": []
+                    }
+                    
+                    items_in_batch = []
+                    batch_count = 0
+                    processed_count = 0
                     
                     # Loop through your data table and set watch history for each item
                     for item in trakt_watch_history_to_set:
-                        item_count += 1
-                        
-                        # Initialize the data variable for the current item
-                        data = None
+                        item_data = {
+                            "ids": {
+                                "imdb": item["IMDB_ID"]
+                            },
+                            "watched_at": item["WatchedAt"]  # Mark when the item was watched
+                        }
                         
                         if item["Type"] == "movie":
-                            # This is a movie
-                            data = {
-                                "movies": [{
-                                    "ids": {
-                                        "imdb": item["IMDB_ID"]
-                                    },
-                                    "watched_at": item["WatchedAt"]  # Mark when the movie was watched
-                                }]
-                            }
-                        
+                            batch['movies'].append(item_data)
                         elif item["Type"] == "episode":
+                            batch['episodes'].append(item_data)
+                        else:
+                            # Skip shows as they will mark all episodes as watched
+                            continue
                         
-                            # This is an episode                                
-                            data = {
-                                "episodes": [{
-                                    "ids": {
-                                        "imdb": item["IMDB_ID"]
-                                    },
-                                    "watched_at": item["WatchedAt"]  # Mark when the episode was watched
-                                }]
-                            }
+                        items_in_batch.append(item)
                         
-                        '''
-                        # Skip adding shows, because it will mark all episodes as watched
-                        elif item["Type"] == "show":
-                            # This is an episode
-                            data = {
-                                "shows": [{
-                                    "ids": {
-                                        "imdb": item["IMDB_ID"]
-                                    },
-                                    "watched_at": item["WatchedAt"]  # Mark when the episode was watched
-                                }]
-                            }
-                        '''
-                        
-                        if data:
-                            # Make the API call to mark the item as watched
-                            response = EH.make_trakt_request(watch_history_url, payload=data)
-                            
-                            season_number = item.get('SeasonNumber')
-                            episode_number = item.get('EpisodeNumber')
-                            if season_number and episode_number:
-                                season_number = str(season_number).zfill(2)
-                                episode_number = str(episode_number).zfill(2)
-                                episode_title = f'[S{season_number}E{episode_number}] '
-                            else:
-                                episode_title = ''
-                            
-                            year_str = f' ({item["Year"]})' if item["Year"] is not None else '' # sometimes year is None for episodes from trakt so remove it from the print string
+                        # Send batch when it reaches the batch size
+                        if len(batch['movies']) + len(batch['episodes']) >= TRAKT_BATCH_SIZE:
+                            batch_count += 1
+                            response = EH.make_trakt_request(watch_history_url, payload=batch)
                             
                             if response and response.status_code in [200, 201, 204]:
-                                print(f" - Adding {item['Type']} ({item_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}) to Trakt Watch History ({item['IMDB_ID']})")
-                            
+                                # Print all items in batch
+                                for item in items_in_batch:
+                                    processed_count += 1
+                                    season_number = item.get('SeasonNumber')
+                                    episode_number = item.get('EpisodeNumber')
+                                    if season_number and episode_number:
+                                        season_number = str(season_number).zfill(2)
+                                        episode_number = str(episode_number).zfill(2)
+                                        episode_title = f'[S{season_number}E{episode_number}] '
+                                    else:
+                                        episode_title = ''
+                                    print(f" - Adding {item['Type']} ({processed_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}) to Trakt Watch History ({item['IMDB_ID']})")
                             else:
-                                error_message = f"Failed to add {item['Type']} ({item_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}) to Trakt Watch History ({item['IMDB_ID']})"
+                                # Print errors for failed items
+                                for item in items_in_batch:
+                                    processed_count += 1
+                                    season_number = item.get('SeasonNumber')
+                                    episode_number = item.get('EpisodeNumber')
+                                    if season_number and episode_number:
+                                        season_number = str(season_number).zfill(2)
+                                        episode_number = str(episode_number).zfill(2)
+                                        episode_title = f'[S{season_number}E{episode_number}] '
+                                    else:
+                                        episode_title = ''
+                                    error_message = f"Failed to add {item['Type']} ({processed_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}) to Trakt Watch History ({item['IMDB_ID']})"
+                                    print(f"   - {error_message}")
+                                    EL.logger.error(error_message)
+                            
+                            # Reset batch
+                            batch = {
+                                "movies": [],
+                                "episodes": []
+                            }
+                            items_in_batch = []
+                            
+                            # Small delay between batches to avoid rate limiting
+                            if batch_count % 10 == 0:  # Every 10 batches (500 items)
+                                time.sleep(TRAKT_BATCH_DELAY * 2)
+                            else:
+                                time.sleep(TRAKT_BATCH_DELAY)
+                    
+                    # Send remaining items in final batch
+                    if len(batch['movies']) + len(batch['episodes']) > 0:
+                        batch_count += 1
+                        response = EH.make_trakt_request(watch_history_url, payload=batch)
+                        
+                        if response and response.status_code in [200, 201, 204]:
+                            # Print all items in final batch
+                            for item in items_in_batch:
+                                processed_count += 1
+                                season_number = item.get('SeasonNumber')
+                                episode_number = item.get('EpisodeNumber')
+                                if season_number and episode_number:
+                                    season_number = str(season_number).zfill(2)
+                                    episode_number = str(episode_number).zfill(2)
+                                    episode_title = f'[S{season_number}E{episode_number}] '
+                                else:
+                                    episode_title = ''
+                                print(f" - Adding {item['Type']} ({processed_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}) to Trakt Watch History ({item['IMDB_ID']})")
+                        else:
+                            # Print errors for failed items
+                            for item in items_in_batch:
+                                processed_count += 1
+                                season_number = item.get('SeasonNumber')
+                                episode_number = item.get('EpisodeNumber')
+                                if season_number and episode_number:
+                                    season_number = str(season_number).zfill(2)
+                                    episode_number = str(episode_number).zfill(2)
+                                    episode_title = f'[S{season_number}E{episode_number}] '
+                                else:
+                                    episode_title = ''
+                                error_message = f"Failed to add {item['Type']} ({processed_count} of {num_items}): {episode_title}{item['Title']} ({item['Year']}) to Trakt Watch History ({item['IMDB_ID']})"
                                 print(f"   - {error_message}")
                                 EL.logger.error(error_message)
 
-                    print('Setting Trakt Watch History Complete')
+                    print(f'Setting Trakt Watch History Complete (Processed {processed_count} items in {batch_count} batch(es))')
                 else:
                     print('No Trakt Watch History To Set')
                     
@@ -1387,6 +1628,12 @@ def main():
                                             WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'ipc-promptable-base__content')]//div[@data-titleinlist='true']")))
                                             
                                             print(f" - Adding {item.get('Type')} ({item_count} of {num_items}): {episode_title}{item.get('Title')}{year_str} to IMDB Watch History ({item.get('IMDB_ID')})")
+                                            
+                                            # Small delay between operations to avoid being flagged
+                                            if item_count % 10 == 0:  # Every 10 items, slightly longer delay
+                                                time.sleep(IMDB_BATCH_DELAY)
+                                            else:
+                                                time.sleep(IMDB_OPERATION_DELAY)
                             
                                             break  # Break the loop if successful
                                         except TimeoutException:
