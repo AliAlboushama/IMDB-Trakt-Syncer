@@ -136,7 +136,7 @@ def main():
                 raise SystemExit
             
             # Example: Wait for an element and interact with it
-            wait = WebDriverWait(driver, 10)
+            wait = WebDriverWait(driver, 30)  # Increased timeout to 30 seconds
             
             # go to IMDB homepage
             success, status_code, url, driver, wait = EH.get_page_with_retries('https://www.imdb.com/', driver, wait)
@@ -144,13 +144,95 @@ def main():
                 # Page failed to load, raise an exception
                 raise PageLoadException(f"Failed to load page. Status code: {status_code}. URL: {url}")
 
-            time.sleep(2)
+            # Wait for page to fully load and JavaScript to execute
+            time.sleep(3)
+            
+            # Wait for document ready state
+            WebDriverWait(driver, 10).until(lambda d: d.execute_script("return document.readyState") == "complete")
 
-            # Check if still signed in from previous session
+            # Check if still signed in from previous session using multiple methods
+            # Method 1: Use JavaScript to check for common sign-in indicators
+            signed_in = False
             try:
-                element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".nav__userMenu .navbar__user-menu-toggle__button")))
+                # JavaScript to check for various sign-in indicators
+                sign_in_check_js = """
+                return (function() {
+                    // Check for user menu elements (various possible selectors)
+                    var userMenuSelectors = [
+                        '.nav__userMenu',
+                        '.navbar__user',
+                        '[data-testid="user-menu"]',
+                        '.imdb-header__accountmenu',
+                        '.nav__userMenu .navbar__user-menu-toggle__button',
+                        '.nav__userMenu.navbar__user'
+                    ];
+                    
+                    for (var i = 0; i < userMenuSelectors.length; i++) {
+                        var elements = document.querySelectorAll(userMenuSelectors[i]);
+                        if (elements && elements.length > 0) {
+                            return true;
+                        }
+                    }
+                    
+                    // Check if sign-in button exists (means not signed in)
+                    var signInButton = document.querySelector('a[href*="signin"], a[href*="sign-in"], .ipc-button[href*="signin"]');
+                    if (signInButton && signInButton.offsetParent !== null) {
+                        return false;
+                    }
+                    
+                    // Check for cookies that might indicate sign-in
+                    var cookies = document.cookie;
+                    if (cookies.includes('session-id') || cookies.includes('ubid-main') || cookies.includes('at-main')) {
+                        return true;
+                    }
+                    
+                    // Check for localStorage/sessionStorage
+                    try {
+                        if (localStorage.getItem('signin_status') === 'true' || sessionStorage.getItem('signed_in') === 'true') {
+                            return true;
+                        }
+                    } catch(e) {}
+                    
+                    // Default: assume not signed in if we can't determine
+                    return false;
+                })();
+                """
+                signed_in = driver.execute_script(sign_in_check_js)
+                
+                # Method 2: Try to find user menu elements with shorter timeout (fallback)
+                if not signed_in:
+                    short_wait = WebDriverWait(driver, 5)  # Shorter timeout for fallback check
+                    selectors_to_try = [
+                        ".nav__userMenu .navbar__user-menu-toggle__button",
+                        ".nav__userMenu.navbar__user",
+                        ".nav__userMenu",
+                        "[data-testid='user-menu']",
+                        ".imdb-header__accountmenu",
+                        "a[href*='/user/']",
+                        ".navbar__user"
+                    ]
+                    
+                    for selector in selectors_to_try:
+                        try:
+                            # Use a very short timeout for each selector
+                            element = WebDriverWait(driver, 2).until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
+                            # Verify it's visible
+                            if element.is_displayed():
+                                signed_in = True
+                                break
+                        except (TimeoutException, NoSuchElementException):
+                            continue
+                            
+            except Exception as e:
+                # If JavaScript check fails, assume not signed in and proceed
+                # Don't print error for expected cases where user might not be signed in
+                signed_in = False
+            
+            if signed_in:
                 print("Successfully signed in to IMDB")
-            except TimeoutException:
+            else:
+                # Not signed in - this is expected and we'll proceed with sign-in flow
+                pass
                 # Not signed in from previous session, proceed with sign in logic
                 time.sleep(2)
                 
@@ -181,12 +263,74 @@ def main():
                     raise PageLoadException(f"Failed to load page. Status code: {status_code}. URL: {url}")
 
                 time.sleep(2)
+                
+                # Wait for document ready state after navigation
+                WebDriverWait(driver, 10).until(lambda d: d.execute_script("return document.readyState") == "complete")
 
-                # Check if signed in
+                # Check if signed in after login attempt using multiple methods
+                signed_in = False
                 try:
-                    element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".nav__userMenu .navbar__user-menu-toggle__button")))
+                    # Use JavaScript to check for sign-in indicators
+                    sign_in_check_js = """
+                    return (function() {
+                        var userMenuSelectors = [
+                            '.nav__userMenu',
+                            '.navbar__user',
+                            '[data-testid="user-menu"]',
+                            '.imdb-header__accountmenu',
+                            '.nav__userMenu .navbar__user-menu-toggle__button',
+                            '.nav__userMenu.navbar__user'
+                        ];
+                        
+                        for (var i = 0; i < userMenuSelectors.length; i++) {
+                            var elements = document.querySelectorAll(userMenuSelectors[i]);
+                            if (elements && elements.length > 0 && elements[0].offsetParent !== null) {
+                                return true;
+                            }
+                        }
+                        
+                        // Check if we're redirected away from sign-in page
+                        if (!window.location.href.includes('signin') && !window.location.href.includes('sign-in')) {
+                            var signInButton = document.querySelector('a[href*="signin"], a[href*="sign-in"]');
+                            if (!signInButton || signInButton.offsetParent === null) {
+                                return true;  // No sign-in button visible, likely signed in
+                            }
+                        }
+                        
+                        return false;
+                    })();
+                    """
+                    signed_in = driver.execute_script(sign_in_check_js)
+                    
+                    # Fallback: Try CSS selectors with shorter timeout
+                    if not signed_in:
+                        short_wait = WebDriverWait(driver, 5)
+                        selectors_to_try = [
+                            ".nav__userMenu .navbar__user-menu-toggle__button",
+                            ".nav__userMenu.navbar__user",
+                            ".nav__userMenu",
+                            "[data-testid='user-menu']",
+                            ".imdb-header__accountmenu",
+                            "a[href*='/user/']"
+                        ]
+                        
+                        for selector in selectors_to_try:
+                            try:
+                                element = short_wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
+                                if element.is_displayed():
+                                    signed_in = True
+                                    break
+                            except (TimeoutException, NoSuchElementException):
+                                continue
+                                
+                except Exception as e:
+                    print(f"Could not verify sign-in status after login: {e}")
+                    # Assume not signed in and let error handling below handle it
+                    signed_in = False
+                
+                if signed_in:
                     print("Successfully signed in to IMDB")
-                except TimeoutException:
+                else:
                     print("\nError: Not signed in to IMDB")
                     print("\nPossible Causes and Solutions:")
                     print("- IMDB captcha check triggered or incorrect IMDB login.")
