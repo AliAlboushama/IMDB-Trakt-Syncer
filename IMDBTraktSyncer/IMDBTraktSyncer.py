@@ -825,7 +825,7 @@ def main():
                             elif media_type == 'episode':
                                 data['episode'] = {
                                     "ids": {
-                                        "imdb": episode_id
+                                        "imdb": imdb_id
                                     }
                                 }
                             else:

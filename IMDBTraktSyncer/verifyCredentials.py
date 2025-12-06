@@ -2,6 +2,7 @@ import os
 import json
 import sys
 import datetime
+import logging
 from datetime import timezone
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -350,7 +351,7 @@ def prompt_sync_reviews():
                 return sync_reviews_value
     except FileNotFoundError:
         # Log the error but continue to prompt the user
-        EL.error("Credentials file not found", exc_info=True)
+        EL.logger.error("Credentials file not found", exc_info=True)
         credentials = {}
 
     # Prompt the user for input until a valid response is given
@@ -374,7 +375,7 @@ def prompt_sync_reviews():
         with open(file_path, 'w', encoding='utf-8') as file:
             json.dump(credentials, file, indent=4, separators=(', ', ': '))
     except Exception as e:
-        EL.error("Failed to write to credentials file", exc_info=True)
+        EL.logger.error("Failed to write to credentials file", exc_info=True)
 
     return sync_reviews_value
 
