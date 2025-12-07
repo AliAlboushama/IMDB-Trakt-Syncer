@@ -66,7 +66,7 @@ IMDBTraktSyncer is a powerful Python tool that seamlessly synchronizes your movi
 pip install IMDBTraktSyncer
 
 # Or install from source
-git clone https://github.com/RileyXX/IMDB-Trakt-Syncer.git
+git clone https://github.com/AliAlboushama/IMDB-Trakt-Syncer.git
 cd IMDB-Trakt-Syncer
 pip install -r requirements.txt
 ```
