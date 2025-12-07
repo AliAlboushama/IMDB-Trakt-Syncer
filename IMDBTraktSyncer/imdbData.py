@@ -20,6 +20,7 @@ def generate_imdb_exports(driver, wait, directory, sync_watchlist_value, sync_ra
   
     # Generate watchlist export if sync_watchlist_value is True
     if sync_watchlist_value or remove_watched_from_watchlists_value:
+        print('    • Requesting watchlist export...', flush=True)
         success, status_code, url, driver, wait = EH.get_page_with_retries('https://www.imdb.com/list/watchlist', driver, wait)
         if not success:
             # Page failed to load, raise an exception
@@ -32,12 +33,14 @@ def generate_imdb_exports(driver, wait, directory, sync_watchlist_value, sync_ra
             wait.until(EC.visibility_of(export_button))
             driver.execute_script("arguments[0].click();", export_button)
             time.sleep(3)
+            print('      ✓ Watchlist export requested', flush=True)
         except TimeoutException:
             # print("Export button not found, possibly because the list is empty.")
             pass
     
     # Generate ratings export if sync_ratings_value is True
     if sync_ratings_value or mark_rated_as_watched_value:
+        print('    • Requesting ratings export...', flush=True)
         success, status_code, url, driver, wait = EH.get_page_with_retries('https://www.imdb.com/list/ratings', driver, wait)
         if not success:
             # Page failed to load, raise an exception
@@ -49,12 +52,14 @@ def generate_imdb_exports(driver, wait, directory, sync_watchlist_value, sync_ra
             wait.until(EC.visibility_of(export_button))
             driver.execute_script("arguments[0].click();", export_button)
             time.sleep(3)
+            print('      ✓ Ratings export requested', flush=True)
         except TimeoutException:
             # print("Export button not found, possibly because the list is empty.")
             pass
     
     # Generate checkins export if sync_watch_history_value is True
     if sync_watch_history_value or remove_watched_from_watchlists_value or mark_rated_as_watched_value:
+        print('    • Requesting check-ins export...', flush=True)
         success, status_code, url, driver, wait = EH.get_page_with_retries('https://www.imdb.com/list/checkins', driver, wait)
         if not success:
             # Page failed to load, raise an exception
@@ -66,6 +71,7 @@ def generate_imdb_exports(driver, wait, directory, sync_watchlist_value, sync_ra
             wait.until(EC.visibility_of(export_button))
             driver.execute_script("arguments[0].click();", export_button)
             time.sleep(3)
+            print('      ✓ Check-ins export requested', flush=True)
         except TimeoutException:
             # print("Export button not found, possibly because the list is empty.")
             pass
@@ -86,7 +92,7 @@ def generate_imdb_exports(driver, wait, directory, sync_watchlist_value, sync_ra
     last_status_time = 0
     status_interval = 30  # Print status every 30 seconds
 
-    print('    • Waiting for IMDB to generate exports (this may take a few minutes)...')
+    print('    • Waiting for IMDB to generate exports (this may take a few minutes)...', flush=True)
     
     while time.time() - start_time < max_wait_time:
         elapsed_time = int(time.time() - start_time)
@@ -101,14 +107,14 @@ def generate_imdb_exports(driver, wait, directory, sync_watchlist_value, sync_ra
             # Locate all elements with the selector
             summary_items = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, ".ipc-metadata-list-summary-item")))
         except TimeoutException:
-            print("      No items found when attempting to generate IMDB exports. Assuming no IMDB watchlist, ratings or check-ins to download.")
+            print("      No items found when attempting to generate IMDB exports. Assuming no IMDB watchlist, ratings or check-ins to download.", flush=True)
             break
 
         # Check if any summary item contains "in progress"
         in_progress_items = check_in_progress(summary_items)
         
         if not in_progress_items:
-            print(f'      ✓ All exports ready! (took {elapsed_time} seconds)')
+            print(f'      ✓ All exports ready! (took {elapsed_time} seconds)', flush=True)
             break
         else:
             # Print status updates every 30 seconds
@@ -117,7 +123,7 @@ def generate_imdb_exports(driver, wait, directory, sync_watchlist_value, sync_ra
                 progress_items = ', '.join([item.split('\n')[0] for item in in_progress_items[:2]])  # Show first 2 items
                 if len(in_progress_items) > 2:
                     progress_items += f' and {len(in_progress_items) - 2} more'
-                print(f'      ⏳ Waiting... ({elapsed_time}s elapsed, max {remaining_minutes}m remaining) - Processing: {progress_items}')
+                print(f'      ⏳ Waiting... ({elapsed_time}s elapsed, max {remaining_minutes}m remaining) - Processing: {progress_items}', flush=True)
                 last_status_time = elapsed_time
             
             time.sleep(check_interval)  # Check every 10 seconds instead of 30
@@ -156,7 +162,7 @@ def download_imdb_exports(driver, wait, directory, sync_watchlist_value, sync_ra
     try:
         summary_items = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, ".ipc-metadata-list-summary-item")))
     except TimeoutException:
-        print("      No items found when attempting to download IMDB exports. Assuming no IMDB watchlist, ratings or check-ins to download.")
+        print("      No items found when attempting to download IMDB exports. Assuming no IMDB watchlist, ratings or check-ins to download.", flush=True)
         return driver, wait
 
     # Helper function to find buttons for CSV downloads
@@ -167,9 +173,9 @@ def download_imdb_exports(driver, wait, directory, sync_watchlist_value, sync_ra
                     button = item.find_element(By.CSS_SELECTOR, "button[data-testid*='export-status-button']")
                     return button
                 except Exception:
-                    print(f"      Export button not found for '{item_text}' on IMDB exports page https://www.imdb.com/exports/")
+                    print(f"      Export button not found for '{item_text}' on IMDB exports page https://www.imdb.com/exports/", flush=True)
                     return None
-        print(f"      No section found matching '{item_text}' on IMDB exports page https://www.imdb.com/exports/")
+        print(f"      No section found matching '{item_text}' on IMDB exports page https://www.imdb.com/exports/", flush=True)
         return None
 
     # Find download buttons
@@ -194,7 +200,7 @@ def download_imdb_exports(driver, wait, directory, sync_watchlist_value, sync_ra
         if csv_link:
             try:
                 downloads_count += 1
-                print(f'    • Downloading {display_name.lower()}...')
+                print(f'    • Downloading {display_name.lower()}...', flush=True)
                 driver.execute_script("arguments[0].scrollIntoView(true);", csv_link)
                 wait.until(EC.visibility_of(csv_link))
                 driver.execute_script("arguments[0].click();", csv_link)
@@ -220,7 +226,7 @@ def download_imdb_exports(driver, wait, directory, sync_watchlist_value, sync_ra
 
                 if download_complete:
                     grant_permissions_and_rename_file(downloaded_files[0], file_name)
-                    print(f'      ✓ {display_name} downloaded successfully')
+                    print(f'      ✓ {display_name} downloaded successfully', flush=True)
                 else:
                     # Fallback: try to find the file anyway
                     downloaded_files = sorted(
@@ -230,21 +236,21 @@ def download_imdb_exports(driver, wait, directory, sync_watchlist_value, sync_ra
                     )
                     if downloaded_files:
                         grant_permissions_and_rename_file(downloaded_files[0], file_name)
-                        print(f'      ✓ {display_name} downloaded successfully')
+                        print(f'      ✓ {display_name} downloaded successfully', flush=True)
                     else:
-                        print(f"      ✗ Unable to locate downloaded file for {display_name.lower()}")
+                        print(f"      ✗ Unable to locate downloaded file for {display_name.lower()}", flush=True)
             except Exception as e:
-                print(f"      ✗ Failed to download {display_name.lower()}: {str(e)}")
+                print(f"      ✗ Failed to download {display_name.lower()}: {str(e)}", flush=True)
         else:
             if sync_watchlist_value and file_name == "watchlist.csv":
-                print(f'      ⚠ No export available for {display_name.lower()}, skipping...')
+                print(f'      ⚠ No export available for {display_name.lower()}, skipping...', flush=True)
             elif (sync_ratings_value or mark_rated_as_watched_value) and file_name == "ratings.csv":
-                print(f'      ⚠ No export available for {display_name.lower()}, skipping...')
+                print(f'      ⚠ No export available for {display_name.lower()}, skipping...', flush=True)
             elif (sync_watch_history_value or remove_watched_from_watchlists_value or mark_rated_as_watched_value) and file_name == "checkins.csv":
-                print(f'      ⚠ No export available for {display_name.lower()}, skipping...')
+                print(f'      ⚠ No export available for {display_name.lower()}, skipping...', flush=True)
 
     if downloads_count > 0:
-        print(f'      ✓ Download complete ({downloads_count} file(s))')
+        print(f'      ✓ Download complete ({downloads_count} file(s))', flush=True)
 
     return driver, wait
 

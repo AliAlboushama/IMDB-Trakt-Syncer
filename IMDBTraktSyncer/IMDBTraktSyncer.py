@@ -417,30 +417,30 @@ def main():
             print('Processing Trakt Data Complete')
             
             # Get IMDB Data
-            print('Processing IMDB Data')
-            print('  - Requesting IMDB data exports...')
+            print('Processing IMDB Data', flush=True)
+            print('  - Requesting IMDB data exports...', flush=True)
             driver, wait = imdbData.generate_imdb_exports(driver, wait, directory, sync_watchlist_value, sync_ratings_value, sync_watch_history_value, remove_watched_from_watchlists_value, mark_rated_as_watched_value)
-            print('  - Downloading IMDB export files...')
+            print('  - Downloading IMDB export files...', flush=True)
             driver, wait = imdbData.download_imdb_exports(driver, wait, directory, sync_watchlist_value, sync_ratings_value, sync_watch_history_value, remove_watched_from_watchlists_value, mark_rated_as_watched_value)
             
-            print('  - Reading IMDB data from files...')
+            print('  - Reading IMDB data from files...', flush=True)
             if sync_watchlist_value or remove_watched_from_watchlists_value:
-                print('    • Reading watchlist...')
+                print('    • Reading watchlist...', flush=True)
                 imdb_watchlist, imdb_watchlist_size, driver, wait = imdbData.get_imdb_watchlist(driver, wait, directory)
-                print(f'    • Watchlist: {imdb_watchlist_size} items loaded')
+                print(f'    • Watchlist: {imdb_watchlist_size} items loaded', flush=True)
             if sync_ratings_value or mark_rated_as_watched_value:
-                print('    • Reading ratings...')
+                print('    • Reading ratings...', flush=True)
                 imdb_ratings, driver, wait = imdbData.get_imdb_ratings(driver, wait, directory)
-                print(f'    • Ratings: {len(imdb_ratings)} items loaded')
+                print(f'    • Ratings: {len(imdb_ratings)} items loaded', flush=True)
             if sync_reviews_value:
-                print('    • Reading reviews...')
+                print('    • Reading reviews...', flush=True)
                 imdb_reviews, errors_found_getting_imdb_reviews, driver, wait = imdbData.get_imdb_reviews(driver, wait, directory)
-                print(f'    • Reviews: {len(imdb_reviews)} items loaded')
+                print(f'    • Reviews: {len(imdb_reviews)} items loaded', flush=True)
             if sync_watch_history_value or remove_watched_from_watchlists_value or mark_rated_as_watched_value:
-                print('    • Reading watch history...')
+                print('    • Reading watch history...', flush=True)
                 imdb_watch_history, imdb_watch_history_size, driver, wait = imdbData.get_imdb_checkins(driver, wait, directory)
-                print(f'    • Watch history: {imdb_watch_history_size} items loaded')
-            print('Processing IMDB Data Complete')
+                print(f'    • Watch history: {imdb_watch_history_size} items loaded', flush=True)
+            print('Processing IMDB Data Complete', flush=True)
                         
             if sync_watchlist_value:
                 # Check if IMDB watchlist has reached the 10,000 item limit. If limit is reached, disable syncing watchlists.
