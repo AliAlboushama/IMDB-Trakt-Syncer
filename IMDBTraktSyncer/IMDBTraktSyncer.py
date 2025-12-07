@@ -418,16 +418,28 @@ def main():
             
             # Get IMDB Data
             print('Processing IMDB Data')
+            print('  - Requesting IMDB data exports...')
             driver, wait = imdbData.generate_imdb_exports(driver, wait, directory, sync_watchlist_value, sync_ratings_value, sync_watch_history_value, remove_watched_from_watchlists_value, mark_rated_as_watched_value)
+            print('  - Downloading IMDB export files...')
             driver, wait = imdbData.download_imdb_exports(driver, wait, directory, sync_watchlist_value, sync_ratings_value, sync_watch_history_value, remove_watched_from_watchlists_value, mark_rated_as_watched_value)
+            
+            print('  - Reading IMDB data from files...')
             if sync_watchlist_value or remove_watched_from_watchlists_value:
+                print('    • Reading watchlist...')
                 imdb_watchlist, imdb_watchlist_size, driver, wait = imdbData.get_imdb_watchlist(driver, wait, directory)
+                print(f'    • Watchlist: {imdb_watchlist_size} items loaded')
             if sync_ratings_value or mark_rated_as_watched_value:
+                print('    • Reading ratings...')
                 imdb_ratings, driver, wait = imdbData.get_imdb_ratings(driver, wait, directory)
+                print(f'    • Ratings: {len(imdb_ratings)} items loaded')
             if sync_reviews_value:
+                print('    • Reading reviews...')
                 imdb_reviews, errors_found_getting_imdb_reviews, driver, wait = imdbData.get_imdb_reviews(driver, wait, directory)
+                print(f'    • Reviews: {len(imdb_reviews)} items loaded')
             if sync_watch_history_value or remove_watched_from_watchlists_value or mark_rated_as_watched_value:
+                print('    • Reading watch history...')
                 imdb_watch_history, imdb_watch_history_size, driver, wait = imdbData.get_imdb_checkins(driver, wait, directory)
+                print(f'    • Watch history: {imdb_watch_history_size} items loaded')
             print('Processing IMDB Data Complete')
                         
             if sync_watchlist_value:
