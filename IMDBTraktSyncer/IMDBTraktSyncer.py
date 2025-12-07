@@ -799,21 +799,21 @@ def main():
                                 if 'ipc-icon--done' not in watchlist_button.get_attribute('innerHTML'):
                                     retry_count = 0
                                     while retry_count < 2:
-                                    driver.execute_script("arguments[0].click();", watchlist_button)
-                                    try:
-                                        WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.CSS_SELECTOR, 'button[data-testid="tm-box-wl-button"] .ipc-icon--done')))
-                                        
-                                        print(f" - Added {item['Type']} ({item_count} of {num_items}): {episode_title}{item['Title']}{year_str} to IMDB Watchlist ({item['IMDB_ID']})")
-                                        
-                                        # Small delay between operations to avoid being flagged
-                                        if item_count % 10 == 0:  # Every 10 items, slightly longer delay
-                                            time.sleep(IMDB_BATCH_DELAY)
-                                        else:
-                                            time.sleep(IMDB_OPERATION_DELAY)
-                                        
-                                        break  # Break the loop if successful
-                                    except TimeoutException:
-                                        retry_count += 1
+                                        driver.execute_script("arguments[0].click();", watchlist_button)
+                                        try:
+                                            WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.CSS_SELECTOR, 'button[data-testid="tm-box-wl-button"] .ipc-icon--done')))
+                                            
+                                            print(f" - Added {item['Type']} ({item_count} of {num_items}): {episode_title}{item['Title']}{year_str} to IMDB Watchlist ({item['IMDB_ID']})")
+                                            
+                                            # Small delay between operations to avoid being flagged
+                                            if item_count % 10 == 0:  # Every 10 items, slightly longer delay
+                                                time.sleep(IMDB_BATCH_DELAY)
+                                            else:
+                                                time.sleep(IMDB_OPERATION_DELAY)
+                                            
+                                            break  # Break the loop if successful
+                                        except TimeoutException:
+                                            retry_count += 1
 
                                     if retry_count == 2:
                                         error_message = f"Failed to add item ({item_count} of {num_items}): {episode_title}{item['Title']}{year_str} to IMDB Watchlist ({item['IMDB_ID']})"
