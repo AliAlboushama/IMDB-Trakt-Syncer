@@ -66,7 +66,7 @@ IMDBTraktSyncer is a powerful Python tool that seamlessly synchronizes your movi
 pip install IMDBTraktSyncer
 
 # Or install from source
-git clone https://github.com/RileyXX/IMDB-Trakt-Syncer.git
+git clone https://github.com/AliAlboushama/IMDB-Trakt-Syncer.git
 cd IMDB-Trakt-Syncer
 pip install -r requirements.txt
 ```
@@ -387,16 +387,6 @@ python -m pytest
 
 ---
 
-## 📊 Statistics
-
-### Project Stats
-
-- **Active Development**: Yes
-- **First Release**: 2023
-- **Latest Version**: 3.7+
-- **Downloads**: 10,000+
-- **Stars**: Growing!
-
 ### Feature Coverage
 
 ```
@@ -448,31 +438,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ```
 
 ---
-
-## 🙏 Acknowledgments
-
-### Original Author
-- **RileyXX** - Initial work and maintenance
-
-### Contributors
-- All the amazing contributors who have helped improve this project
-- The Trakt.tv team for their excellent API
-- The Selenium project for browser automation tools
-
-### Special Thanks
-- Everyone who reported issues and suggested improvements
-- The open-source community for inspiration and support
-
----
-
-## 📞 Support
-
-### Getting Help
-
-- 📖 **Documentation**: You're reading it!
-- 🐛 **Bug Reports**: [GitHub Issues](https://github.com/RileyXX/IMDB-Trakt-Syncer/issues)
-- 💬 **Discussions**: [GitHub Discussions](https://github.com/RileyXX/IMDB-Trakt-Syncer/discussions)
-- 📧 **Email**: Check the repository for contact info
 
 ### Useful Links
 
