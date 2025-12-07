@@ -435,24 +435,35 @@ def main():
                 driver.execute_script("arguments[0].click();", english_element)
             
             # Check IMDB reference view setting for compatability. See: https://www.imdb.com/preferences/general
-            # Load page
-            success, status_code, url, driver, wait = EH.get_page_with_retries(f'https://www.imdb.com/preferences/general', driver, wait)
-            if not success:
-                # Page failed to load, raise an exception
-                raise PageLoadException(f"Failed to load page. Status code: {status_code}. URL: {url}")
-            # Find reference view checkbox
-            reference_checkbox = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[id*='reference-view-toggle']"))).get_attribute("checked")
             reference_view_changed = False
-            if reference_checkbox:
-                print("Temporarily disabling reference view IMDB setting for compatability. See: https://www.imdb.com/preferences/general")
-                # Click reference view checkbox
-                reference_checkbox = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "input[id*='reference-view-toggle']")))
-                driver.execute_script("arguments[0].click();", reference_checkbox)
-                # Submit
-                submit = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".article input[type*='submit']")))
-                driver.execute_script("arguments[0].click();", submit)
-                reference_view_changed = True
-                time.sleep(1)
+            try:
+                # Load page
+                success, status_code, url, driver, wait = EH.get_page_with_retries(f'https://www.imdb.com/preferences/general', driver, wait, total_wait_time=30)
+                if success:
+                    # Try to find reference view checkbox (with short timeout since IMDB may have removed this)
+                    try:
+                        reference_checkbox = WebDriverWait(driver, 5).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, "input[id*='reference-view-toggle']"))
+                        ).get_attribute("checked")
+                        
+                        if reference_checkbox:
+                            print("Temporarily disabling reference view IMDB setting for compatability. See: https://www.imdb.com/preferences/general")
+                            # Click reference view checkbox
+                            reference_checkbox_elem = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "input[id*='reference-view-toggle']")))
+                            driver.execute_script("arguments[0].click();", reference_checkbox_elem)
+                            # Submit
+                            submit = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".article input[type*='submit']")))
+                            driver.execute_script("arguments[0].click();", submit)
+                            reference_view_changed = True
+                            time.sleep(1)
+                    except (TimeoutException, NoSuchElementException):
+                        # Reference view setting not found - IMDB may have removed it or changed the UI
+                        # This is fine, just continue without it
+                        pass
+            except Exception as e:
+                # If there's any error accessing the preferences page, log it but continue
+                print(f"Note: Could not check IMDB reference view setting (page may have changed). Continuing...")
+                EL.logger.warning(f"Failed to access IMDB preferences: {e}")
                 
             # Initalize list values
             trakt_watchlist = trakt_ratings = trakt_reviews = trakt_watch_history = imdb_watchlist = imdb_ratings = imdb_reviews = imdb_watch_history = []
@@ -924,73 +935,234 @@ def main():
                         # Fast path: use IMDB's AJAX watchlist endpoint first, then fall back to Selenium UI if needed
                         api_succeeded = False
                         if consecutive_api_failures < IMDB_API_FAILURE_LIMIT:
-                            api_succeeded, status_code, api_error = add_to_imdb_watchlist_via_api(driver, item["IMDB_ID"])
-                            if api_succeeded:
-                                consecutive_api_failures = 0
-                                print(f" - Added {item['Type']} ({item_count} of {num_items}): {episode_title}{item['Title']}{year_str} to IMDB Watchlist ({item['IMDB_ID']})")
-                                
-                                # Respect IMDB API rules with lightweight throttling
-                                if item_count % 10 == 0:
-                                    time.sleep(IMDB_BATCH_DELAY)
+                            try:
+                                api_succeeded, status_code, api_error = add_to_imdb_watchlist_via_api(driver, item["IMDB_ID"])
+                                if api_succeeded:
+                                    consecutive_api_failures = 0
+                                    print(f" - Added {item['Type']} ({item_count} of {num_items}): {episode_title}{item['Title']}{year_str} to IMDB Watchlist ({item['IMDB_ID']}) [API]")
+                                    
+                                    # Respect IMDB API rules with lightweight throttling
+                                    if item_count % 10 == 0:
+                                        time.sleep(IMDB_BATCH_DELAY)
+                                    else:
+                                        time.sleep(IMDB_API_DELAY)
+                                    
+                                    continue  # Move to the next item without opening the page
                                 else:
-                                    time.sleep(IMDB_API_DELAY)
-                                
-                                continue  # Move to the next item without opening the page
-                            else:
+                                    consecutive_api_failures += 1
+                                    if api_error:
+                                        EL.logger.warning(f"Fast IMDB add failed for {item['IMDB_ID']} (status {status_code}): {api_error}. Falling back to Selenium...")
+                            except Exception as e:
                                 consecutive_api_failures += 1
-                                if api_error:
-                                    EL.logger.warning(f"Fast IMDB add failed for {item['IMDB_ID']} (status {status_code}): {api_error}")
+                                EL.logger.warning(f"API add exception for {item['IMDB_ID']}: {e}. Falling back to Selenium...")
+                        
+                        # If we reach here, API either failed or is disabled - use Selenium UI
+                        if item_count == 1:
+                            print(f"  → Using Selenium UI method (API fast-path: {consecutive_api_failures} failures)")
                         
                         try:
-                            # Load page
-                            success, status_code, url, driver, wait = EH.get_page_with_retries(f'https://www.imdb.com/title/{item["IMDB_ID"]}/', driver, wait)
-                            if not success:
-                                # Page failed to load, raise an exception
-                                raise PageLoadException(f"Failed to load page. Status code: {status_code}. URL: {url}")
+                            # Load page with better error handling
+                            try:
+                                success, status_code, url, driver, wait = EH.get_page_with_retries(f'https://www.imdb.com/title/{item["IMDB_ID"]}/', driver, wait, total_wait_time=60)
+                                if not success:
+                                    # Page failed to load, log and skip
+                                    error_message = f"Failed to add item ({item_count} of {num_items}): {episode_title}{item['Title']}{year_str} to IMDB Watchlist ({item['IMDB_ID']}) - Page load failed (status {status_code})"
+                                    print(f" - {error_message}")
+                                    EL.logger.error(error_message)
+                                    continue
+                            except KeyboardInterrupt:
+                                # User wants to stop - re-raise to stop the entire script
+                                raise
+                            except Exception as e:
+                                error_message = f"Failed to add item ({item_count} of {num_items}): {episode_title}{item['Title']}{year_str} to IMDB Watchlist ({item['IMDB_ID']}) - Exception: {e}"
+                                print(f" - {error_message}")
+                                EL.logger.error(error_message)
+                                continue
                             
                             current_url = driver.current_url
                             
                             # Check if the URL doesn't contain "/reference"
                             if "/reference" not in current_url:
-                                # Wait until the loader has disappeared, indicating the watchlist button has loaded
-                                wait.until(EC.invisibility_of_element_located((By.CSS_SELECTOR, '[data-testid="tm-box-wl-loader"]')))
+                                try:
+                                    # Wait until the loader has disappeared, indicating the watchlist button has loaded
+                                    wait.until(EC.invisibility_of_element_located((By.CSS_SELECTOR, '[data-testid="tm-box-wl-loader"]')))
+                                except TimeoutException:
+                                    # Loader not found or already gone - that's fine, continue
+                                    pass
                                 
-                                # Scroll the page to bring the element into view
-                                watchlist_button = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'button[data-testid="tm-box-wl-button"]')))
-                                driver.execute_script("arguments[0].scrollIntoView(true);", watchlist_button)
+                                # Find and check watchlist button with stale element retry
+                                max_stale_retries = 3
+                                stale_retry = 0
+                                button_clicked = False
                                 
-                                # Wait for the element to be clickable
-                                watchlist_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[data-testid="tm-box-wl-button"]')))
-                                
-                                # Check if item is already in watchlist otherwise skip it
-                                if 'ipc-icon--done' not in watchlist_button.get_attribute('innerHTML'):
-                                    retry_count = 0
-                                    while retry_count < 2:
-                                        driver.execute_script("arguments[0].click();", watchlist_button)
-                                        try:
-                                            WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.CSS_SELECTOR, 'button[data-testid="tm-box-wl-button"] .ipc-icon--done')))
-                                            
-                                            print(f" - Added {item['Type']} ({item_count} of {num_items}): {episode_title}{item['Title']}{year_str} to IMDB Watchlist ({item['IMDB_ID']})")
-                                            
-                                            # Small delay between operations to avoid being flagged
-                                            if item_count % 10 == 0:  # Every 10 items, slightly longer delay
-                                                time.sleep(IMDB_BATCH_DELAY)
+                                while stale_retry < max_stale_retries and not button_clicked:
+                                    try:
+                                        # Try multiple selectors for the watchlist button
+                                        watchlist_button = None
+                                        selectors = [
+                                            'div.sc-dcb1530e-3:nth-child(2)',           # Updated IMDB selector (2024)
+                                            'button[data-testid="tm-box-wl-button"]',  # Primary selector
+                                            'button[aria-label*="watchlist" i]',        # Backup: aria-label contains "watchlist"
+                                            'button.ipc-split-button__btn--add',       # Backup: Add to watchlist button class
+                                            '[data-testid="title-actions-menu"] button', # Backup: Actions menu button
+                                            'div[class*="sc-"][class*="-3"]',          # Generic pattern for IMDB dynamic classes
+                                        ]
+                                        
+                                        # Also try XPath as last resort
+                                        xpath_selector = '/html/body/div[2]/main/div/section[1]/section/div[3]/section/section/div[3]/div[2]/div[2]/div[3]/div[2]'
+                                        
+                                        for selector in selectors:
+                                            try:
+                                                watchlist_button = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
+                                                if watchlist_button:
+                                                    EL.logger.info(f"Found watchlist button using selector: {selector}")
+                                                    break
+                                            except (TimeoutException, NoSuchElementException):
+                                                continue
+                                        
+                                        # If CSS selectors failed, try XPath
+                                        if not watchlist_button:
+                                            try:
+                                                watchlist_button = wait.until(EC.presence_of_element_located((By.XPATH, xpath_selector)))
+                                                if watchlist_button:
+                                                    EL.logger.info(f"Found watchlist button using XPath")
+                                            except (TimeoutException, NoSuchElementException):
+                                                pass
+                                        
+                                        if not watchlist_button:
+                                            # Could not find watchlist button with any selector
+                                            error_message = f"Failed to add item ({item_count} of {num_items}): {episode_title}{item['Title']}{year_str} to IMDB Watchlist ({item['IMDB_ID']}) - Watchlist button not found on page"
+                                            print(f" - {error_message}")
+                                            EL.logger.error(f"{error_message}. Current URL: {driver.current_url}")
+                                            break
+                                        
+                                        # Element found, scroll into view
+                                        driver.execute_script("arguments[0].scrollIntoView(true);", watchlist_button)
+                                        
+                                        # Small wait for any animations
+                                        time.sleep(0.3)
+                                        
+                                        # Re-find after scroll to ensure element is fresh (use the same selector that worked)
+                                        working_selector = None
+                                        working_selector_type = "CSS"
+                                        
+                                        for selector in selectors:
+                                            try:
+                                                watchlist_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
+                                                if watchlist_button:
+                                                    working_selector = selector
+                                                    break
+                                            except (TimeoutException, NoSuchElementException):
+                                                continue
+                                        
+                                        # If CSS selectors failed, try XPath
+                                        if not watchlist_button:
+                                            try:
+                                                watchlist_button = wait.until(EC.element_to_be_clickable((By.XPATH, xpath_selector)))
+                                                if watchlist_button:
+                                                    working_selector = xpath_selector
+                                                    working_selector_type = "XPATH"
+                                            except (TimeoutException, NoSuchElementException):
+                                                pass
+                                        
+                                        # Check if item is already in watchlist
+                                        button_html = watchlist_button.get_attribute('innerHTML')
+                                        button_text = watchlist_button.text.lower() if watchlist_button.text else ""
+                                        
+                                        # Check multiple indicators that item is already in watchlist
+                                        already_in_watchlist = (
+                                            'ipc-icon--done' in button_html or 
+                                            'checkmark' in button_html.lower() or
+                                            'in watchlist' in button_text or
+                                            'added' in button_text
+                                        )
+                                        
+                                        if already_in_watchlist:
+                                            error_message1 = f" - Skipped item ({item_count} of {num_items}): {episode_title}{item['Title']}{year_str} - Already in IMDB watchlist ({item['IMDB_ID']})"
+                                            print(error_message1)
+                                            EL.logger.info(error_message1)
+                                            button_clicked = True
+                                            break
+                                        
+                                        # Click the button
+                                        retry_count = 0
+                                        while retry_count < 2:
+                                            try:
+                                                # Re-find button right before clicking to minimize staleness
+                                                watchlist_button = None
+                                                if working_selector_type == "CSS":
+                                                    for selector in selectors:
+                                                        try:
+                                                            watchlist_button = driver.find_element(By.CSS_SELECTOR, selector)
+                                                            if watchlist_button:
+                                                                break
+                                                        except NoSuchElementException:
+                                                            continue
+                                                else:  # XPATH
+                                                    try:
+                                                        watchlist_button = driver.find_element(By.XPATH, xpath_selector)
+                                                    except NoSuchElementException:
+                                                        pass
+                                                
+                                                if not watchlist_button:
+                                                    raise NoSuchElementException("Watchlist button disappeared")
+                                                
+                                                driver.execute_script("arguments[0].click();", watchlist_button)
+                                                
+                                                # Wait for success indicator (check multiple possible indicators)
+                                                def check_success(driver):
+                                                    try:
+                                                        # Try to find the button again and check if it changed
+                                                        if working_selector_type == "CSS":
+                                                            btn = driver.find_element(By.CSS_SELECTOR, working_selector)
+                                                        else:
+                                                            btn = driver.find_element(By.XPATH, working_selector)
+                                                        
+                                                        html = btn.get_attribute('innerHTML')
+                                                        text = btn.text.lower() if btn.text else ""
+                                                        return ('ipc-icon--done' in html or 
+                                                               'checkmark' in html.lower() or 
+                                                               'in watchlist' in text or
+                                                               'added' in text)
+                                                    except:
+                                                        return False
+                                                
+                                                WebDriverWait(driver, 5).until(check_success)
+                                                
+                                                print(f" - Added {item['Type']} ({item_count} of {num_items}): {episode_title}{item['Title']}{year_str} to IMDB Watchlist ({item['IMDB_ID']}) [Selenium]")
+                                                
+                                                # Small delay between operations to avoid being flagged
+                                                if item_count % 10 == 0:  # Every 10 items, slightly longer delay
+                                                    time.sleep(IMDB_BATCH_DELAY)
+                                                else:
+                                                    time.sleep(IMDB_OPERATION_DELAY)
+                                                
+                                                button_clicked = True
+                                                break  # Break the loop if successful
+                                            except (TimeoutException, NoSuchElementException) as e:
+                                                retry_count += 1
+                                                if retry_count >= 2:
+                                                    error_message = f"Failed to add item ({item_count} of {num_items}): {episode_title}{item['Title']}{year_str} to IMDB Watchlist ({item['IMDB_ID']}) - Button click timeout or element disappeared"
+                                                    print(f" - {error_message}")
+                                                    EL.logger.error(f"{error_message}. Exception: {e}")
+                                                    button_clicked = True
+                                                else:
+                                                    time.sleep(0.5)  # Wait before retry
+                                        
+                                        break  # Exit stale retry loop if we got this far
+                                        
+                                    except Exception as e:
+                                        # Handle stale element or other errors
+                                        if 'stale element' in str(e).lower():
+                                            stale_retry += 1
+                                            if stale_retry >= max_stale_retries:
+                                                error_message = f"Failed to add item ({item_count} of {num_items}) after {max_stale_retries} retries: {episode_title}{item['Title']}{year_str} to IMDB Watchlist ({item['IMDB_ID']})"
+                                                print(f" - {error_message}")
+                                                EL.logger.error(error_message)
                                             else:
-                                                time.sleep(IMDB_OPERATION_DELAY)
-                                            
-                                            break  # Break the loop if successful
-                                        except TimeoutException:
-                                            retry_count += 1
-
-                                    if retry_count == 2:
-                                        error_message = f"Failed to add item ({item_count} of {num_items}): {episode_title}{item['Title']}{year_str} to IMDB Watchlist ({item['IMDB_ID']})"
-                                        print(f" - {error_message}")
-                                        EL.logger.error(error_message)
-                                else:
-                                    error_message1 = f" - Failed to add item ({item_count} of {num_items}): {episode_title}{item['Title']}{year_str} to IMDB Watchlist ({item['IMDB_ID']})"
-                                    error_message2 = f"   - {item['Type'].capitalize()} already exists in IMDB watchlist."
-                                    EL.logger.error(error_message1)
-                                    EL.logger.error(error_message2)
+                                                time.sleep(0.5)  # Wait before retry
+                                        else:
+                                            raise  # Re-raise if it's not a stale element error
                             else:
                                 # Handle the case when the URL contains "/reference"
                                 
@@ -1002,11 +1174,17 @@ def main():
                                 if 'not-inWL' in watchlist_button.get_attribute('class'):
                                     driver.execute_script("arguments[0].click();", watchlist_button)
                             
-                        except (NoSuchElementException, TimeoutException, PageLoadException):
-                            error_message = f"Failed to add item ({item_count} of {num_items}): {item['Title']}{year_str} to IMDB Watchlist ({item['IMDB_ID']})"
+                        except KeyboardInterrupt:
+                            # User pressed Ctrl+C - stop the script
+                            raise
+                        except (NoSuchElementException, TimeoutException, PageLoadException) as e:
+                            error_message = f"Failed to add item ({item_count} of {num_items}): {item['Title']}{year_str} to IMDB Watchlist ({item['IMDB_ID']}) - {type(e).__name__}"
                             print(f"  - {error_message}")
                             EL.logger.error(error_message, exc_info=True)
-                            pass
+                        except Exception as e:
+                            error_message = f"Unexpected error adding item ({item_count} of {num_items}): {item['Title']}{year_str} to IMDB Watchlist ({item['IMDB_ID']}) - {type(e).__name__}: {e}"
+                            print(f"  - {error_message}")
+                            EL.logger.error(error_message, exc_info=True)
 
                     
                     print('Setting IMDB Watchlist Items Complete')

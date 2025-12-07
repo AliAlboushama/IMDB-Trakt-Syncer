@@ -6,6 +6,7 @@ from datetime import datetime
 from selenium.webdriver.common.by import By
 from selenium.common.exceptions import NoSuchElementException, TimeoutException
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -501,16 +502,24 @@ def get_imdb_reviews(driver, wait, directory):
     #Get IMDB Reviews
     
     # Load page
-    success, status_code, url, driver, wait = EH.get_page_with_retries('https://www.imdb.com/profile', driver, wait)
+    success, status_code, url, driver, wait = EH.get_page_with_retries('https://www.imdb.com/profile', driver, wait, total_wait_time=60)
     if not success:
-        # Page failed to load, raise an exception
-        raise PageLoadException(f"Failed to load page. Status code: {status_code}. URL: {url}")
+        # Page failed to load, log warning and return empty reviews
+        print("      ⚠ Could not load IMDB profile page for reviews. Skipping reviews sync.")
+        EL.logger.warning(f"Failed to load IMDB profile page. Status code: {status_code}. URL: {url}")
+        return [], False, driver, wait
     
     reviews = []
     errors_found_getting_imdb_reviews = False
     try:
-        # Wait until the current page URL contains the string "user/"
-        wait.until(lambda driver: "user/" in driver.current_url)
+        # Wait until the current page URL contains the string "user/" (with timeout)
+        try:
+            wait_short = WebDriverWait(driver, 10)
+            wait_short.until(lambda driver: "user/" in driver.current_url)
+        except TimeoutException:
+            print("      ⚠ IMDB profile page did not redirect to user page. Skipping reviews sync.")
+            EL.logger.warning("IMDB profile page timeout - could not find user/ in URL")
+            return [], False, driver, wait
         
         # Copy the full URL to a variable and append reviews to it
         reviews_url = driver.current_url + "reviews/"
