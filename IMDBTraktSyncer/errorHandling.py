@@ -368,34 +368,74 @@ def make_request_with_retries(url, method="GET", headers=None, params=None, payl
 def clean_title(title):
     return re.sub(r'[^a-zA-Z0-9. ]', '', title).lower()
     
-# Function to resolve IMDB_ID redirection using the driver
-def resolve_imdb_id_with_driver(imdb_id, driver, wait):
-    try:
-        # Construct the IMDB URL
-        url = f"https://www.imdb.com/title/{imdb_id}/"
-        
-        # Load URL
-        success, status_code, resolved_url, driver, wait = get_page_with_retries(url, driver, wait)
-        if not success:
-            raise PageLoadException(f"Failed to load page. Status code: {status_code}. URL: {resolved_url}")
-        
-        # Extract the redirected IMDB_ID from the resolved URL
-        final_imdb_id = resolved_url.split("/title/")[1].split("/")[0]
-        return final_imdb_id, driver, wait
+# Global cache for resolved IMDB IDs - persists across all update_outdated_imdb_ids_from_trakt calls
+_imdb_id_resolution_cache = {}
 
-    except Exception as e:
-        print(f"Error resolving IMDB_ID {imdb_id}: {e}")
-        return imdb_id, driver, wait  # Return the original ID if an error occurs
+# Function to resolve IMDB_ID redirection using lightweight HEAD request first, then driver fallback
+def resolve_imdb_id_fast(imdb_id, driver, wait):
+    """
+    Resolve IMDB ID redirects using a fast HEAD request first, with driver fallback.
+    Results are cached globally to avoid re-resolving the same ID.
+    """
+    global _imdb_id_resolution_cache
+    
+    # Check cache first
+    if imdb_id in _imdb_id_resolution_cache:
+        return _imdb_id_resolution_cache[imdb_id], driver, wait
+    
+    resolved_id = imdb_id  # Default to same if resolution fails
+    url = f"https://www.imdb.com/title/{imdb_id}/"
+    
+    try:
+        # Try lightweight HEAD request first (no page render, much faster)
+        try:
+            response = requests.head(url, allow_redirects=True, timeout=10,
+                                     headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36'})
+            if response.status_code == 200:
+                final_url = response.url
+                if '/title/' in final_url:
+                    resolved_id = final_url.split('/title/')[1].split('/')[0]
+        except (requests.RequestException, Exception):
+            # HEAD request failed, fall back to full driver page load
+            try:
+                success, status_code, resolved_url, driver, wait = get_page_with_retries(url, driver, wait, total_wait_time=30)
+                if success and '/title/' in resolved_url:
+                    resolved_id = resolved_url.split('/title/')[1].split('/')[0]
+            except Exception:
+                pass  # Keep original ID
+    except Exception:
+        pass  # Keep original ID
+    
+    # Cache the result
+    _imdb_id_resolution_cache[imdb_id] = resolved_id
+    return resolved_id, driver, wait
+
+# Function to resolve IMDB_ID redirection using the driver (legacy, kept for compatibility)
+def resolve_imdb_id_with_driver(imdb_id, driver, wait):
+    return resolve_imdb_id_fast(imdb_id, driver, wait)
     
 # Function to resolve and update outdated IMDB_IDs from the trakt list based on matching Title and Type comparison
-def update_outdated_imdb_ids_from_trakt(trakt_list, imdb_list, driver, wait):
-    comparison_keys = ['Title', 'Type', 'IMDB_ID']  # Only compare Title and Type
+def update_outdated_imdb_ids_from_trakt(trakt_list, imdb_list, driver, wait, list_name="items", show_progress=True):
+    """
+    Resolve conflicting IMDB IDs between Trakt and IMDB lists using fast HEAD requests.
+    
+    Args:
+        trakt_list: List of items from Trakt
+        imdb_list: List of items from IMDB
+        driver: Selenium webdriver instance
+        wait: Selenium WebDriverWait instance
+        list_name: Name of the list for progress display
+        show_progress: Whether to show progress updates
+    
+    Returns:
+        tuple: (updated_trakt_list, imdb_list, driver, wait)
+    """
+    comparison_keys = ['Title', 'Type', 'IMDB_ID']
 
     # Group items by (Title, Type), cleaning the Title
     trakt_grouped = {}
     for item in trakt_list:
         if all(key in item for key in comparison_keys):
-            # Clean Title before creating the key
             cleaned_title = clean_title(item['Title'])
             key = (cleaned_title, item['Type'])
             trakt_grouped.setdefault(key, set()).add(item['IMDB_ID'])
@@ -403,7 +443,6 @@ def update_outdated_imdb_ids_from_trakt(trakt_list, imdb_list, driver, wait):
     imdb_grouped = {}
     for item in imdb_list:
         if all(key in item for key in comparison_keys):
-            # Clean Title before creating the key
             cleaned_title = clean_title(item['Title'])
             key = (cleaned_title, item['Type'])
             imdb_grouped.setdefault(key, set()).add(item['IMDB_ID'])
@@ -414,39 +453,52 @@ def update_outdated_imdb_ids_from_trakt(trakt_list, imdb_list, driver, wait):
         if trakt_grouped[key] != imdb_grouped[key]
     }
     
-    '''
-    print(f"Initial Conflicting Items: {conflicting_items}")
-    '''
+    # Collect all IDs that need resolution
+    ids_to_resolve = set()
+    for key in conflicting_items:
+        ids_to_resolve.update(trakt_grouped[key])
     
-    # Resolve conflicts by checking IMDB_ID redirection using the driver
+    total_conflicts = len(ids_to_resolve)
+    
+    if total_conflicts > 0 and show_progress:
+        print(f"      Resolving {total_conflicts} conflicting {list_name} IDs...", flush=True)
+    
+    # Resolve all conflicting IDs with progress tracking
+    resolved_count = 0
+    cache_hits = 0
+    
     for key in conflicting_items:
         trakt_ids = trakt_grouped[key]
-        imdb_ids = imdb_grouped[key]
 
-        # Resolve IMDB_IDs using the driver only for trakt_list
-        resolved_trakt_ids = set()
         for trakt_id in trakt_ids:
-            resolved_id, driver, wait = resolve_imdb_id_with_driver(trakt_id, driver, wait)
-            resolved_trakt_ids.add(resolved_id)
+            # Check if already cached (fast path)
+            was_cached = trakt_id in _imdb_id_resolution_cache
+            
+            resolved_id, driver, wait = resolve_imdb_id_fast(trakt_id, driver, wait)
+            
+            if was_cached:
+                cache_hits += 1
+            else:
+                resolved_count += 1
+                # Show progress every 5 resolutions
+                if show_progress and resolved_count % 5 == 0:
+                    print(f"\r      Resolved {resolved_count}/{total_conflicts} IDs (cache hits: {cache_hits})...", end='', flush=True)
 
-            # Directly update IMDB_ID in the original trakt_list
-            for item in trakt_list:
-                if item['IMDB_ID'] == trakt_id:
-                    item['IMDB_ID'] = resolved_id
-
-        # Skip resolving IMDB_IDs in imdb_list as they're already current
-        resolved_imdb_ids = imdb_ids
-        
-        '''
-        # If resolved trakt IDs match imdb IDs, the conflict is considered resolved
-        if resolved_trakt_ids == resolved_imdb_ids:
-            print(f"Resolved conflict for: {key}")
-        else:
-            print(f"Conflict not resolved for: {key}")
-        '''
-        
+            # Update IMDB_ID in the original trakt_list
+            if resolved_id != trakt_id:
+                for item in trakt_list:
+                    if item.get('IMDB_ID') == trakt_id:
+                        item['IMDB_ID'] = resolved_id
     
+    if total_conflicts > 0 and show_progress:
+        print(f"\r      ✓ Resolved {total_conflicts} {list_name} IDs (cache hits: {cache_hits})          ", flush=True)
+
     return trakt_list, imdb_list, driver, wait
+
+def clear_imdb_id_cache():
+    """Clear the global IMDB ID resolution cache."""
+    global _imdb_id_resolution_cache
+    _imdb_id_resolution_cache = {}
     
 # Function to filter out items that share the same Title, Year, and Type
 # AND have non-matching IMDB_ID values, using cleaned titles for comparison

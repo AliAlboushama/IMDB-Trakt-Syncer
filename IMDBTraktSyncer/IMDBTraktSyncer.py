@@ -24,6 +24,60 @@ TRAKT_BATCH_SIZE = 50  # Number of items to batch together for Trakt API request
 TRAKT_BATCH_DELAY = 0.1  # Small delay between batch requests (100ms) to avoid rate limiting
 IMDB_OPERATION_DELAY = 0.3  # Small delay between IMDB operations (300ms) to avoid being flagged as bot
 IMDB_BATCH_DELAY = 1.0  # Slightly longer delay every 10 IMDB operations (1 second)
+IMDB_API_DELAY = 0.35  # Throttle between lightweight IMDB API calls (350ms) to respect IMDB rules
+IMDB_API_FAILURE_LIMIT = 3  # Disable the fast path after this many consecutive API failures
+
+def add_to_imdb_watchlist_via_api(driver, imdb_id):
+    """
+    Attempt to add a title to the IMDB watchlist using the lightweight IMDB AJAX endpoint.
+    Falls back to Selenium UI clicks when the endpoint is unavailable or fails repeatedly.
+    
+    Returns:
+        tuple: (success: bool, status_code: int, error_message: str | None)
+    """
+    try:
+        result = driver.execute_async_script("""
+            const imdbId = arguments[0];
+            const callback = arguments[1];
+            
+            // Extract CSRF token from cookies if present
+            const csrfMatch = document.cookie.match(/csrfToken=([^;]+)/);
+            const csrfToken = csrfMatch ? decodeURIComponent(csrfMatch[1]).split('%3A')[0] : '';
+            
+            const headers = {
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                'X-Requested-With': 'XMLHttpRequest'
+            };
+            if (csrfToken) {
+                headers['X-Imdb-Csrf-Token'] = csrfToken;
+            }
+            
+            fetch('https://www.imdb.com/list/_ajax/watchlist_add', {
+                method: 'POST',
+                credentials: 'include',
+                headers,
+                body: 'const=' + encodeURIComponent(imdbId)
+            }).then(async (resp) => {
+                let data = null;
+                try {
+                    data = await resp.json();
+                } catch (e) {
+                    // If response is not JSON, ignore parsing errors
+                }
+                callback({ status: resp.status, ok: resp.ok, data });
+            }).catch((err) => callback({ status: 0, ok: false, error: err ? err.toString() : 'unknown error' }));
+        """, imdb_id)
+        
+        if isinstance(result, dict) and result.get('ok') and result.get('status') == 200:
+            return True, 200, None
+        
+        status_code = result.get('status') if isinstance(result, dict) else 0
+        error_message = None
+        if isinstance(result, dict):
+            error_message = result.get('error')
+        return False, status_code, error_message
+    except Exception as e:
+        return False, 0, str(e)
 
 def main():
     parser = argparse.ArgumentParser(description="IMDBTraktSyncer CLI")
@@ -403,45 +457,84 @@ def main():
             # Initalize list values
             trakt_watchlist = trakt_ratings = trakt_reviews = trakt_watch_history = imdb_watchlist = imdb_ratings = imdb_reviews = imdb_watch_history = []
             
-            # Get Trakt Data
-            print('Processing Trakt Data')
-            trakt_encoded_username = traktData.get_trakt_encoded_username()
-            if sync_watchlist_value or remove_watched_from_watchlists_value:
-                trakt_watchlist = traktData.get_trakt_watchlist(trakt_encoded_username)
-            if sync_ratings_value or mark_rated_as_watched_value:
-                trakt_ratings = traktData.get_trakt_ratings(trakt_encoded_username)
-            if sync_reviews_value:
-                trakt_reviews = traktData.get_trakt_comments(trakt_encoded_username)
-            if sync_watch_history_value or remove_watched_from_watchlists_value or mark_rated_as_watched_value:
-                trakt_watch_history = traktData.get_trakt_watch_history(trakt_encoded_username)
-            print('Processing Trakt Data Complete')
+            # ═══════════════════════════════════════════════════════════════════════════
+            # PHASE: Processing Trakt Data (fast API calls)
+            # ═══════════════════════════════════════════════════════════════════════════
+            print('\n🎬 Processing Trakt Data', flush=True)
+            print('─' * 24, flush=True)
+            trakt_start_time = time.time()
             
-            # Get IMDB Data
-            print('Processing IMDB Data', flush=True)
-            print('  - Requesting IMDB data exports...', flush=True)
+            print('  • Fetching user profile...', flush=True)
+            trakt_encoded_username = traktData.get_trakt_encoded_username()
+            
+            if sync_watchlist_value or remove_watched_from_watchlists_value:
+                print('  • Loading watchlist...', end='', flush=True)
+                trakt_watchlist = traktData.get_trakt_watchlist(trakt_encoded_username)
+                print(f' ✓ {len(trakt_watchlist)} items', flush=True)
+            
+            if sync_ratings_value or mark_rated_as_watched_value:
+                print('  • Loading ratings...', end='', flush=True)
+                trakt_ratings = traktData.get_trakt_ratings(trakt_encoded_username)
+                print(f' ✓ {len(trakt_ratings)} items', flush=True)
+            
+            if sync_reviews_value:
+                print('  • Loading reviews/comments...', end='', flush=True)
+                trakt_reviews = traktData.get_trakt_comments(trakt_encoded_username)
+                print(f' ✓ {len(trakt_reviews)} items', flush=True)
+            
+            if sync_watch_history_value or remove_watched_from_watchlists_value or mark_rated_as_watched_value:
+                print('  • Loading watch history...', end='', flush=True)
+                trakt_watch_history = traktData.get_trakt_watch_history(trakt_encoded_username)
+                print(f' ✓ {len(trakt_watch_history)} items', flush=True)
+            
+            trakt_elapsed = time.time() - trakt_start_time
+            print(f'  ✓ Trakt data loaded ({trakt_elapsed:.1f}s)', flush=True)
+            
+            # ═══════════════════════════════════════════════════════════════════════════
+            # PHASE: Processing IMDB Data (export generation + CSV parsing)
+            # ═══════════════════════════════════════════════════════════════════════════
+            print('\n🎥 Processing IMDB Data', flush=True)
+            print('─' * 23, flush=True)
+            imdb_start_time = time.time()
+            
+            print('  • Requesting IMDB data exports (this may take a few minutes)...', flush=True)
             driver, wait = imdbData.generate_imdb_exports(driver, wait, directory, sync_watchlist_value, sync_ratings_value, sync_watch_history_value, remove_watched_from_watchlists_value, mark_rated_as_watched_value)
-            print('  - Downloading IMDB export files...', flush=True)
+            
+            print('  • Downloading IMDB export files...', flush=True)
             driver, wait = imdbData.download_imdb_exports(driver, wait, directory, sync_watchlist_value, sync_ratings_value, sync_watch_history_value, remove_watched_from_watchlists_value, mark_rated_as_watched_value)
             
-            print('  - Reading IMDB data from files...', flush=True)
+            print('  • Parsing downloaded CSV files...', flush=True)
             if sync_watchlist_value or remove_watched_from_watchlists_value:
-                print('    • Reading watchlist...', flush=True)
+                print('    • Parsing watchlist...', end='', flush=True)
                 imdb_watchlist, imdb_watchlist_size, driver, wait = imdbData.get_imdb_watchlist(driver, wait, directory)
-                print(f'    • Watchlist: {imdb_watchlist_size} items loaded', flush=True)
+                print(f' ✓ {imdb_watchlist_size} items', flush=True)
+            
             if sync_ratings_value or mark_rated_as_watched_value:
-                print('    • Reading ratings...', flush=True)
+                print('    • Parsing ratings...', end='', flush=True)
                 imdb_ratings, driver, wait = imdbData.get_imdb_ratings(driver, wait, directory)
-                print(f'    • Ratings: {len(imdb_ratings)} items loaded', flush=True)
+                print(f' ✓ {len(imdb_ratings)} items', flush=True)
+            
             if sync_reviews_value:
-                print('    • Reading reviews...', flush=True)
+                print('    • Fetching reviews (via web scraping)...', end='', flush=True)
                 imdb_reviews, errors_found_getting_imdb_reviews, driver, wait = imdbData.get_imdb_reviews(driver, wait, directory)
-                print(f'    • Reviews: {len(imdb_reviews)} items loaded', flush=True)
+                print(f' ✓ {len(imdb_reviews)} items', flush=True)
+            
             if sync_watch_history_value or remove_watched_from_watchlists_value or mark_rated_as_watched_value:
-                print('    • Reading watch history...', flush=True)
+                print('    • Parsing watch history...', end='', flush=True)
                 imdb_watch_history, imdb_watch_history_size, driver, wait = imdbData.get_imdb_checkins(driver, wait, directory)
-                print(f'    • Watch history: {imdb_watch_history_size} items loaded', flush=True)
-            print('Processing IMDB Data Complete', flush=True)
-                        
+                print(f' ✓ {imdb_watch_history_size} items', flush=True)
+            
+            imdb_elapsed = time.time() - imdb_start_time
+            print(f'  ✓ IMDB data loaded ({imdb_elapsed:.1f}s)', flush=True)
+            
+            # ═══════════════════════════════════════════════════════════════════════════
+            # PHASE: Analyzing & Comparing Data
+            # ═══════════════════════════════════════════════════════════════════════════
+            print('\n📊 Analyzing & Comparing Data', flush=True)
+            print('─' * 30, flush=True)
+            analysis_start_time = time.time()
+            
+            print('  • Checking list limits...', flush=True)
             if sync_watchlist_value:
                 # Check if IMDB watchlist has reached the 10,000 item limit. If limit is reached, disable syncing watchlists.
                 imdb_watchlist_limit_reached = EH.check_if_watchlist_limit_reached(imdb_watchlist_size)
@@ -450,6 +543,7 @@ def main():
                 # Check if IMDB watch history has reached the 10,000 item limit. If limit is reached, disable syncing watch history.
                 imdb_watch_history_limit_reached = EH.check_if_watch_history_limit_reached(imdb_watch_history_size)
             
+            print('  • Removing duplicates & filtering invalid items...', flush=True)
             # Remove duplicates from Trakt watch_history
             trakt_watch_history = EH.remove_duplicates_by_imdb_id(trakt_watch_history)
                        
@@ -465,12 +559,20 @@ def main():
             
             # Remove unknown Types from review lists
             imdb_reviews, trakt_reviews = EH.remove_unknown_types(imdb_reviews, trakt_reviews)
-                       
+            
+            # ── Resolve conflicting IMDB IDs (fast HEAD requests with caching) ──
+            print('  • Resolving conflicting IMDB IDs (using fast cached resolution)...', flush=True)
+            EH.clear_imdb_id_cache()  # Start fresh for this sync session
+            
             # Update outdated IMDB_IDs from trakt lists based on matching Title and Type comparison
-            trakt_ratings, imdb_ratings, driver, wait = EH.update_outdated_imdb_ids_from_trakt(trakt_ratings, imdb_ratings, driver, wait)
-            trakt_reviews, imdb_reviews, driver, wait = EH.update_outdated_imdb_ids_from_trakt(trakt_reviews, imdb_reviews, driver, wait)
-            trakt_watchlist, imdb_watchlist, driver, wait = EH.update_outdated_imdb_ids_from_trakt(trakt_watchlist, imdb_watchlist, driver, wait)
-            trakt_watch_history, imdb_watch_history, driver, wait = EH.update_outdated_imdb_ids_from_trakt(trakt_watch_history, imdb_watch_history, driver, wait)
+            if sync_ratings_value:
+                trakt_ratings, imdb_ratings, driver, wait = EH.update_outdated_imdb_ids_from_trakt(trakt_ratings, imdb_ratings, driver, wait, list_name="ratings")
+            if sync_reviews_value:
+                trakt_reviews, imdb_reviews, driver, wait = EH.update_outdated_imdb_ids_from_trakt(trakt_reviews, imdb_reviews, driver, wait, list_name="reviews")
+            if sync_watchlist_value:
+                trakt_watchlist, imdb_watchlist, driver, wait = EH.update_outdated_imdb_ids_from_trakt(trakt_watchlist, imdb_watchlist, driver, wait, list_name="watchlist")
+            if sync_watch_history_value or mark_rated_as_watched_value:
+                trakt_watch_history, imdb_watch_history, driver, wait = EH.update_outdated_imdb_ids_from_trakt(trakt_watch_history, imdb_watch_history, driver, wait, list_name="watch history")
             
             '''
             # Removed temporarily to monitor impact. Most conflicts should be resolved by update_outdated_imdb_ids_from_trakt() function
@@ -480,6 +582,9 @@ def main():
             trakt_watchlist, imdb_watchlist = EH.filter_out_mismatched_items(trakt_watchlist, imdb_watchlist)
             trakt_watch_history, imdb_watch_history = EH.filter_out_mismatched_items(trakt_watch_history, imdb_watch_history)
             '''
+            
+            # ── Finding items to sync ──
+            print('  • Comparing lists to find items to sync...', flush=True)
             
             # Filter out items already set: Filters items from the target_list that are not already present in the source_list based on key
             imdb_ratings_to_set = EH.filter_items(imdb_ratings, trakt_ratings, key="IMDB_ID")
@@ -603,12 +708,45 @@ def main():
                 imdb_watchlist_to_set, trakt_watchlist_to_set = EH.remove_combined_watchlist_to_remove_items_from_watchlist_to_set_lists_by_imdb_id(combined_watchlist_to_remove, imdb_watchlist_to_set, trakt_watchlist_to_set)
             
             # Sort lists by date
+            print('  • Sorting items by date...', flush=True)
             imdb_ratings_to_set = EH.sort_by_date_added(imdb_ratings_to_set)
             trakt_ratings_to_set = EH.sort_by_date_added(trakt_ratings_to_set)
             imdb_watchlist_to_set = EH.sort_by_date_added(imdb_watchlist_to_set)
             trakt_watchlist_to_set = EH.sort_by_date_added(trakt_watchlist_to_set)
             imdb_watch_history_to_set = EH.sort_by_date_added(imdb_watch_history_to_set)
             trakt_watch_history_to_set = EH.sort_by_date_added(trakt_watch_history_to_set)
+            
+            # ── Analysis complete - show summary ──
+            analysis_elapsed = time.time() - analysis_start_time
+            print(f'  ✓ Analysis complete ({analysis_elapsed:.1f}s)', flush=True)
+            
+            # Print sync summary
+            print('\n📋 Sync Summary', flush=True)
+            print('─' * 15, flush=True)
+            sync_summary = []
+            if sync_ratings_value:
+                sync_summary.append(f"  Ratings:       {len(trakt_ratings_to_set):>4} → Trakt | {len(imdb_ratings_to_set):>4} → IMDB")
+            if sync_watchlist_value:
+                sync_summary.append(f"  Watchlist:     {len(trakt_watchlist_to_set):>4} → Trakt | {len(imdb_watchlist_to_set):>4} → IMDB")
+            if sync_watch_history_value or mark_rated_as_watched_value:
+                sync_summary.append(f"  Watch History: {len(trakt_watch_history_to_set):>4} → Trakt | {len(imdb_watch_history_to_set):>4} → IMDB")
+            if sync_reviews_value:
+                sync_summary.append(f"  Reviews:       {len(trakt_reviews_to_set):>4} → Trakt | {len(imdb_reviews_to_set):>4} → IMDB")
+            if remove_watched_from_watchlists_value:
+                sync_summary.append(f"  Remove from WL:{len(trakt_watchlist_items_to_remove):>4} Trakt  | {len(imdb_watchlist_items_to_remove):>4} IMDB")
+            
+            for line in sync_summary:
+                print(line, flush=True)
+            
+            total_operations = (len(trakt_ratings_to_set) + len(imdb_ratings_to_set) + 
+                               len(trakt_watchlist_to_set) + len(imdb_watchlist_to_set) + 
+                               len(trakt_watch_history_to_set) + len(imdb_watch_history_to_set) +
+                               len(trakt_reviews_to_set) + len(imdb_reviews_to_set) +
+                               len(trakt_watchlist_items_to_remove) + len(imdb_watchlist_items_to_remove))
+            if total_operations == 0:
+                print('\n  ✓ Everything is already in sync!', flush=True)
+            else:
+                print(f'\n  Total operations: {total_operations}', flush=True)
             
             if sync_watchlist_value and imdb_watchlist_limit_reached:
                 # IMDB watchlist limit reached, skip watchlist actions for IMDB
@@ -621,6 +759,14 @@ def main():
             if mark_rated_as_watched_value and imdb_watch_history_limit_reached:
                 # IMDB watch history limit reached, skip watch history actions for IMDB
                 imdb_watch_history_to_set = []
+            
+            # ═══════════════════════════════════════════════════════════════════════════
+            # PHASE: Syncing Data
+            # ═══════════════════════════════════════════════════════════════════════════
+            if total_operations > 0:
+                print('\n🔄 Syncing Data', flush=True)
+                print('─' * 15, flush=True)
+                sync_start_time = time.time()
                         
             # If sync_watchlist_value is true
             if sync_watchlist_value:
@@ -760,8 +906,10 @@ def main():
                     # Count the total number of items
                     num_items = len(imdb_watchlist_to_set)
                     item_count = 0
+                    consecutive_api_failures = 0
                                     
                     for item in imdb_watchlist_to_set:
+                        item_count += 1
                         season_number = item.get('SeasonNumber')
                         episode_number = item.get('EpisodeNumber')
                         if season_number and episode_number:
@@ -772,9 +920,28 @@ def main():
                             episode_title = ''
                         
                         year_str = f' ({item["Year"]})' if item["Year"] is not None else '' # sometimes year is None for episodes from trakt so remove it from the print string
+                        
+                        # Fast path: use IMDB's AJAX watchlist endpoint first, then fall back to Selenium UI if needed
+                        api_succeeded = False
+                        if consecutive_api_failures < IMDB_API_FAILURE_LIMIT:
+                            api_succeeded, status_code, api_error = add_to_imdb_watchlist_via_api(driver, item["IMDB_ID"])
+                            if api_succeeded:
+                                consecutive_api_failures = 0
+                                print(f" - Added {item['Type']} ({item_count} of {num_items}): {episode_title}{item['Title']}{year_str} to IMDB Watchlist ({item['IMDB_ID']})")
+                                
+                                # Respect IMDB API rules with lightweight throttling
+                                if item_count % 10 == 0:
+                                    time.sleep(IMDB_BATCH_DELAY)
+                                else:
+                                    time.sleep(IMDB_API_DELAY)
+                                
+                                continue  # Move to the next item without opening the page
+                            else:
+                                consecutive_api_failures += 1
+                                if api_error:
+                                    EL.logger.warning(f"Fast IMDB add failed for {item['IMDB_ID']} (status {status_code}): {api_error}")
+                        
                         try:
-                            item_count += 1
-                                                       
                             # Load page
                             success, status_code, url, driver, wait = EH.get_page_with_retries(f'https://www.imdb.com/title/{item["IMDB_ID"]}/', driver, wait)
                             if not success:
@@ -1713,12 +1880,21 @@ def main():
                 driver.execute_script("arguments[0].click();", submit)
                 time.sleep(1)
             
+            # ═══════════════════════════════════════════════════════════════════════════
+            # PHASE: Cleanup & Completion
+            # ═══════════════════════════════════════════════════════════════════════════
+            if total_operations > 0:
+                sync_elapsed = time.time() - sync_start_time
+                print(f'\n✓ Sync complete ({sync_elapsed:.1f}s)', flush=True)
+            
             #Close web driver
-            print("Closing webdriver...")
+            print("\n🔒 Closing webdriver...", flush=True)
             driver.close()
             driver.quit()
             service.stop()
-            print("IMDBTraktSyncer Complete")
+            print("\n" + "═" * 50, flush=True)
+            print("✅ IMDBTraktSyncer Complete", flush=True)
+            print("═" * 50, flush=True)
         
         except Exception as e:
             error_message = "An error occurred while running the script."
